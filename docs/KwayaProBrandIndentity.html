@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KwayaPro — Brand Identity v4 Final</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;800;900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Nunito', sans-serif;
+            background-color: #FFF8EF; /* M3X Surface */
+            color: #1E1B13; /* M3X On-Surface */
+        }
+        .bg-sur-lo { background-color: #FBF3E8; }
+        .bg-sur-hi { background-color: #F0E8DA; }
+        .bg-pri-c { background-color: #FFD97D; }
+        .text-pri { color: #6B4F00; }
+        .text-ter { color: #3C6040; }
+        
+        .dark-mode-card {
+            background-color: #15120B; /* Dark M3X Surface */
+            color: #EAE2D5;
+        }
+
+        /* Scale test animation */
+        @keyframes scaleTest {
+            0% { width: 240px; height: 240px; opacity: 1; }
+            45% { width: 32px; height: 32px; opacity: 1; }
+            50% { width: 32px; height: 32px; opacity: 0.5; }
+            55% { width: 32px; height: 32px; opacity: 1; }
+            100% { width: 240px; height: 240px; opacity: 1; }
+        }
+        .animate-scale {
+            animation: scaleTest 7s cubic-bezier(0.34, 1.56, 0.64, 1) infinite;
+        }
+    </style>
+</head>
+<body class="antialiased min-h-screen pb-24">
+
+    <!-- Header -->
+    <header class="bg-[#FFD97D] text-[#211500] py-16 px-6 text-center shadow-sm relative overflow-hidden">
+        <div class="absolute top-[-50%] left-[-10%] w-[120%] h-[200%] bg-gradient-to-br from-white/20 to-transparent pointer-events-none transform rotate-12"></div>
+        <div class="relative z-10 max-w-4xl mx-auto">
+            <h1 class="text-5xl font-black tracking-tight mb-4 text-[#6B4F00]">KwayaPro Brand Identity</h1>
+            <div class="inline-block bg-[#3C6040] text-white px-4 py-1 rounded-full text-xs font-bold uppercase tracking-widest mb-4 shadow-sm">v4 Production Master</div>
+            <p class="text-lg font-semibold opacity-90 max-w-2xl mx-auto">
+                Refined for high-density mobile screens and pixel-perfect rasterization.
+            </p>
+        </div>
+    </header>
+
+    <main class="max-w-5xl mx-auto px-6 mt-16 space-y-20">
+
+        <!-- 1. THE APP ICON -->
+        <section class="flex flex-col md:flex-row gap-12 items-center">
+            <div class="w-full md:w-1/2 flex justify-center items-center h-80">
+                <!-- App Icon SVG (Final v4 Production Geometry) -->
+                <div class="animate-scale drop-shadow-2xl flex items-center justify-center">
+                    <svg viewBox="0 0 240 240" xmlns="http://www.w3.org/2000/svg" class="w-full h-full">
+                        <defs>
+                            <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stop-color="#FFD97D" />
+                                <stop offset="100%" stop-color="#E8C06A" />
+                            </linearGradient>
+                            <linearGradient id="markGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stop-color="#6B4F00" />
+                                <stop offset="100%" stop-color="#4F3A00" />
+                            </linearGradient>
+                        </defs>
+                        
+                        <!-- M3X Squircle Container -->
+                        <rect width="240" height="240" rx="64" fill="url(#bgGrad)" />
+                        
+                        <!-- Final Refined Mark -->
+                        <g>
+                            <!-- The Head / Music Note Dot -->
+                            <circle cx="88" cy="60" r="24" fill="#3C6040" />
+                            
+                            <!-- Heavy Body Pillar (36px) -->
+                            <path d="M 88 112 L 88 184" 
+                                  stroke="url(#markGrad)" stroke-width="36" stroke-linecap="round" />
+                                  
+                            <!-- Fanned Arms (24px) -->
+                            <!-- Upper arm anchored at y=132 -->
+                            <!-- Lower arm extended to y=186 for raster anti-bleeding -->
+                            <path d="M 88 132 L 158 68 M 88 132 L 162 186" 
+                                  stroke="url(#markGrad)" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" />
+                        </g>
+                    </svg>
+                </div>
+            </div>
+            <div class="w-full md:w-1/2 space-y-6">
+                <h2 class="text-3xl font-black text-[#1E1B13]">Production Ready</h2>
+                <p class="text-[#7B7365] text-lg font-semibold leading-relaxed">
+                    The v4 geometry solves the final edge-case of rasterization. Notice the slight extension of the lower arm—it ensures that when scaled to small pixel grids, the arm and stem terminate with intentional, distinct clarity.
+                </p>
+                <div class="space-y-4">
+                    <div class="p-4 bg-sur-hi rounded-2xl border border-[#CCC5B3]">
+                        <h4 class="font-bold text-[#6B4F00] mb-1">Flutter Integration Notes</h4>
+                        <ul class="text-[#7B7365] text-sm font-semibold space-y-1 list-disc ml-4">
+                            <li>Use <code>flutter_svg</code> for the logo mark.</li>
+                            <li>Use <code>google_fonts</code> with <code>Nunito(fontWeight: FontWeight.w900)</code>.</li>
+                            <li>Maintain a <code>SizedBox(width: 8)</code> between icon and text.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <hr class="border-[#CCC5B3]">
+
+        <!-- 2. FINAL ASSETS FOR COPY-PASTE -->
+        <section class="space-y-8">
+            <h2 class="text-3xl font-black text-[#1E1B13] text-center">Implementation Snippets</h2>
+
+            <div class="bg-[#1E1B13] rounded-[24px] overflow-hidden shadow-xl">
+                <div class="bg-[#38352C] px-6 py-3 flex items-center justify-between">
+                    <span class="text-[#EAE2D5] font-bold text-sm">App Icon SVG Code</span>
+                </div>
+                <div class="p-6 overflow-x-auto text-sm">
+<pre><code class="text-[#A0D1A4]">
+&lt;!-- kwayapro_app_icon.svg --&gt;
+&lt;svg viewBox="0 0 240 240" xmlns="http://www.w3.org/2000/svg"&gt;
+  &lt;rect width="240" height="240" rx="64" fill="#FFD97D" /&gt;
+  &lt;circle cx="88" cy="60" r="24" fill="#3C6040" /&gt;
+  &lt;path d="M 88 112 L 88 184" stroke="#6B4F00" stroke-width="36" stroke-linecap="round" /&gt;
+  &lt;path d="M 88 132 L 158 68 M 88 132 L 162 186" stroke="#6B4F00" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" /&gt;
+&lt;/svg&gt;
+</code></pre>
+                </div>
+            </div>
+
+            <div class="bg-[#1E1B13] rounded-[24px] overflow-hidden shadow-xl">
+                <div class="bg-[#38352C] px-6 py-3 flex items-center justify-between">
+                    <span class="text-[#EAE2D5] font-bold text-sm">Logo Mark Only (For AppBar)</span>
+                </div>
+                <div class="p-6 overflow-x-auto text-sm">
+<pre><code class="text-[#E8C06A]">
+&lt;!-- kwayapro_logo_mark.svg --&gt;
+&lt;svg viewBox="0 0 180 180" xmlns="http://www.w3.org/2000/svg"&gt;
+  &lt;g transform="translate(-16, -12)"&gt;
+    &lt;circle cx="88" cy="60" r="24" fill="#3C6040" /&gt;
+    &lt;path d="M 88 112 L 88 184" stroke="#6B4F00" stroke-width="36" stroke-linecap="round" /&gt;
+    &lt;path d="M 88 132 L 158 68 M 88 132 L 162 186" stroke="#6B4F00" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" /&gt;
+  &lt;/g&gt;
+&lt;/svg&gt;
+</code></pre>
+                </div>
+            </div>
+        </section>
+
+    </main>
+</body>
+</html>
