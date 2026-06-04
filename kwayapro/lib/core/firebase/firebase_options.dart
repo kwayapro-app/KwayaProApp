@@ -22,19 +22,19 @@ class DefaultFirebaseOptions {
   }
 
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'placeholder-api-key-android',
-    appId: '1:1234567890:android:placeholder',
-    messagingSenderId: '1234567890',
-    projectId: 'kwayapro-placeholder',
-    storageBucket: 'kwayapro-placeholder.appspot.com',
+    apiKey: 'AIzaSyBF0S2YXphQ0xCqWcD9kmD4yu1uStSDDMw',
+    appId: '1:432531236139:android:903ae2bc52e6cd2598916e',
+    messagingSenderId: '432531236139',
+    projectId: 'kwayapro-app',
+    storageBucket: 'kwayapro-app.firebasestorage.app',
   );
 
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'placeholder-api-key-ios',
-    appId: '1:1234567890:ios:placeholder',
-    messagingSenderId: '1234567890',
-    projectId: 'kwayapro-placeholder',
-    storageBucket: 'kwayapro-placeholder.appspot.com',
+    apiKey: 'AIzaSyBF0S2YXphQ0xCqWcD9kmD4yu1uStSDDMw',
+    appId: '1:432531236139:ios:placeholder',
+    messagingSenderId: '432531236139',
+    projectId: 'kwayapro-app',
+    storageBucket: 'kwayapro-app.firebasestorage.app',
     iosBundleId: 'com.kwayapro.kwayapro',
   );
 }

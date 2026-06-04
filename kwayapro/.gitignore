@@ -43,3 +43,11 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Firebase secrets — do NOT commit these
+google-services.json
+GoogleService-Info.plist
+
+# Keystore
+*.jks
+*.keystore

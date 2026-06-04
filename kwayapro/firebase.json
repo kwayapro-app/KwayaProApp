@@ -1,0 +1,28 @@
+{
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "kwayapro-app",
+          "appId": "1:432531236139:android:903ae2bc52e6cd2598916e",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "kwayapro-app",
+          "configurations": {
+            "android": "1:432531236139:android:903ae2bc52e6cd2598916e"
+          }
+        }
+      }
+    }
+  }
+}

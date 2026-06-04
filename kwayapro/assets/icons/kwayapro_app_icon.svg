@@ -1,0 +1,7 @@
+<!-- kwayapro_app_icon.svg -->
+<svg viewBox="0 0 240 240" xmlns="http://www.w3.org/2000/svg">
+  <rect width="240" height="240" rx="64" fill="#FFD97D" />
+  <circle cx="88" cy="60" r="24" fill="#3C6040" />
+  <path d="M 88 112 L 88 184" stroke="#6B4F00" stroke-width="36" stroke-linecap="round" />
+  <path d="M 88 132 L 158 68 M 88 132 L 162 186" stroke="#6B4F00" stroke-width="24" stroke-linecap="round" stroke-linejoin="round" />
+</svg>

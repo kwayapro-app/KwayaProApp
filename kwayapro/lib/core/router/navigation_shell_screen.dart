@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../shared/widgets/offline_banner.dart';
 
-class NavigationShellScreen extends StatelessWidget {
+class NavigationShellScreen extends ConsumerWidget {
   final StatefulNavigationShell navigationShell;
 
   const NavigationShellScreen({
@@ -17,12 +19,12 @@ class NavigationShellScreen extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
     return Scaffold(
-      body: navigationShell,
+      body: OfflineBanner(child: navigationShell),
       bottomNavigationBar: NavigationBar(
         selectedIndex: navigationShell.currentIndex,
         onDestinationSelected: (index) => _onTap(context, index),
