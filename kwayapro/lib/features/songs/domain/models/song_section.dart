@@ -19,12 +19,19 @@ class SongSection {
 
   factory SongSection.fromJson(Map<String, dynamic> json) {
     return SongSection(
-      sectionId: json['sectionId'] as String,
-      songId: json['songId'] as String,
-      choirId: json['choirId'] as String,
-      title: json['title'] as String,
-      order: json['order'] as int,
-      status: SectionStatus.values.byName(json['status'] as String),
+      sectionId: json['sectionId'] as String? ?? '',
+      songId: json['songId'] as String? ?? '',
+      choirId: json['choirId'] as String? ?? '',
+      title: json['title'] as String? ?? '',
+      order: json['order'] as int? ?? 0,
+      // Phase 7 note: deliberately kept as byName() (throws on an
+      // unrecognized value) rather than the asNameMap() hygiene pattern used
+      // elsewhere — SongRepository's _parseSkippingBadDocs (Phase 4 Fix 1)
+      // relies on this throwing so the whole malformed doc is skipped and
+      // logged, rather than silently kept with a defaulted status.
+      status: json['status'] != null
+          ? SectionStatus.values.byName(json['status'] as String)
+          : SectionStatus.comingSoon,
     );
   }
 

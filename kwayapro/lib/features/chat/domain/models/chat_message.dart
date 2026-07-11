@@ -24,16 +24,16 @@ class ChatMessage {
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) {
     return ChatMessage(
-      messageId: json['messageId'] as String,
-      choirId: json['choirId'] as String,
-      senderId: json['senderId'] as String,
-      type: MessageType.values.byName(json['type'] as String),
-      content: json['content'] as String,
+      messageId: json['messageId'] as String? ?? '',
+      choirId: json['choirId'] as String? ?? '',
+      senderId: json['senderId'] as String? ?? '',
+      type: MessageType.values.asNameMap()[json['type']] ?? MessageType.text,
+      content: json['content'] as String? ?? '',
       targetVoicePart: json['targetVoicePart'] != null
-          ? VoicePart.values.byName(json['targetVoicePart'] as String)
+          ? VoicePart.values.asNameMap()[json['targetVoicePart']]
           : null,
-      pinned: json['pinned'] as bool,
-      timestamp: (json['timestamp'] as Timestamp).toDate(),
+      pinned: json['pinned'] as bool? ?? false,
+      timestamp: (json['timestamp'] as Timestamp?)?.toDate() ?? DateTime.now(),
     );
   }
 

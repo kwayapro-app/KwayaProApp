@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:share_plus/share_plus.dart';
 import '../../../shared/models/enums.dart';
+import '../../../shared/utils/permission_checker.dart';
 import '../../auth/domain/auth_providers.dart';
 import '../../choir/domain/choir_providers.dart';
 import '../domain/chat_providers.dart';
@@ -43,8 +44,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final membership = ref.watch(currentMembershipProvider).valueOrNull;
     final user = ref.watch(authStateProvider).valueOrNull;
 
-    final isDirectorOrLeader = membership?.role == MemberRole.leader ||
-        membership?.role == MemberRole.director;
+    final isDirectorOrLeader = PermissionChecker(membership).isManagement;
 
     return Column(
       children: [
@@ -602,10 +602,12 @@ class _RecordingIndicator extends StatelessWidget {
           const Spacer(),
           IconButton(
             icon: Icon(Icons.delete, color: Theme.of(context).colorScheme.error),
+            tooltip: 'Discard recording',
             onPressed: onCancel,
           ),
           IconButton.filled(
             icon: const Icon(Icons.send),
+            tooltip: 'Send',
             onPressed: onSend,
           ),
         ],

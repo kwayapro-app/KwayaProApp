@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../../shared/models/enums.dart' show ChoirPlan, MemberRole, VoicePart;
+import '../../../shared/models/enums.dart' show ChoirPlan, VoicePart;
 import '../domain/choir_providers.dart';
 import '../../rehearsal/domain/rehearsal_providers.dart';
 import '../../attendance/domain/attendance_providers.dart';
@@ -29,7 +29,71 @@ class HomeScreen extends ConsumerWidget {
     final rehearsals = ref.watch(upcomingRehearsalsProvider).value ?? [];
     final nextRehearsal = rehearsals.isNotEmpty ? rehearsals.first : null;
 
+    final userChoirs = ref.watch(userChoirsProvider);
+    final activeChoirId = ref.watch(activeChoirIdProvider);
+
+    // Still resolving auth / membership streams — show brief loading
     if (choir == null || membership == null) {
+      // If user choirs have loaded and there are some, but no active choir is
+      // selected, auto-select the first one.
+      final resolved = userChoirs.value;
+      if (resolved != null) {
+        if (resolved.isNotEmpty && activeChoirId == null) {
+          // Auto-select first choir after the frame is built
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            ref
+                .read(activeChoirIdProvider.notifier)
+                .setChoir(resolved.first.choir.choirId);
+          });
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+        // User has no choirs at all — show create/join prompt
+        if (resolved.isEmpty) {
+          return Scaffold(
+            body: SafeArea(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(32),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.music_note,
+                        size: 80,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                      const SizedBox(height: 24),
+                      Text(
+                        'No Choir Yet',
+                        style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'Create a new choir or join one with an invite code.',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      const SizedBox(height: 32),
+                      FilledButton.icon(
+                        onPressed: () => context.push('/onboarding'),
+                        icon: const Icon(Icons.add),
+                        label: const Text('Create or Join a Choir'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        }
+      }
+      // Still loading
       return const Scaffold(
         body: Center(child: CircularProgressIndicator()),
       );
@@ -55,6 +119,7 @@ class HomeScreen extends ConsumerWidget {
         actions: [
           IconButton(
             icon: const Icon(Icons.account_circle),
+            tooltip: 'Profile',
             onPressed: () => context.push('/profile'),
           ),
         ],
@@ -129,13 +194,13 @@ class HomeScreen extends ConsumerWidget {
             const SizedBox(height: 24),
 
             // Voice Part Distribution (Leader/Director only)
-            if (membership.role == MemberRole.leader || membership.role == MemberRole.director) ...[
+            if (PermissionChecker(membership).isManagement) ...[
               _buildVoicePartDistribution(context, members),
               const SizedBox(height: 24),
             ],
 
             // Quick Actions based on Role
-            if (membership.role == MemberRole.leader || membership.role == MemberRole.director) ...[
+            if (PermissionChecker(membership).isManagement) ...[
               Text(
                 'Management',
                 style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
@@ -146,7 +211,7 @@ class HomeScreen extends ConsumerWidget {
                 child: Row(
                   children: [
                     _buildActionChip(context, Icons.event_note, 'Programs', () => context.push('/planner')),
-                    if (membership.role == MemberRole.leader) ...[
+                    if (PermissionChecker(membership).isLeader) ...[
                       const SizedBox(width: 12),
                       _buildActionChip(context, Icons.people, 'Members', () => context.push('/members')),
                       const SizedBox(width: 12),

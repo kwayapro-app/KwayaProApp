@@ -8,13 +8,16 @@
     "shell": "npm run build && firebase functions:shell",
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",
-    "logs": "firebase functions:log"
+    "logs": "firebase functions:log",
+    "test:integration": "npm run build && cd .. && firebase emulators:exec --config firebase.test.json --project=kwayapro-app \"node functions/test/integration.js\""
   },
   "engines": {
-    "node": "24"
+    "node": "22"
   },
   "main": "lib/index.js",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1067.0",
+    "@aws-sdk/s3-request-presigner": "^3.1067.0",
     "firebase-admin": "^13.6.0",
     "firebase-functions": "^7.0.0"
   },

@@ -8,14 +8,20 @@ final subscriptionRepositoryProvider = Provider<SubscriptionRepository>((ref) {
   return SubscriptionRepository();
 });
 
-final subscriptionProvider = StreamProvider.family<Subscription?, String>((ref, choirId) {
-  return ref.read(subscriptionRepositoryProvider).watchSubscription(choirId);
+// Phase 5 Fix 4: previously not autoDispose — see song_providers.dart for
+// the same fix and reasoning.
+final subscriptionProvider = StreamProvider.autoDispose.family<Subscription?, String>((ref, choirId) {
+  final sub = ref.watch(subscriptionRepositoryProvider).watchSubscription(choirId);
+  ref.onDispose(() => sub.drain());
+  return sub;
 });
 
-final currentSubscriptionProvider = StreamProvider<Subscription?>((ref) {
+final currentSubscriptionProvider = StreamProvider.autoDispose<Subscription?>((ref) {
   final choirId = ref.watch(activeChoirIdProvider);
   if (choirId == null) return Stream.value(null);
-  return ref.read(subscriptionRepositoryProvider).watchSubscription(choirId);
+  final sub = ref.watch(subscriptionRepositoryProvider).watchSubscription(choirId);
+  ref.onDispose(() => sub.drain());
+  return sub;
 });
 
 final selectedPlanProvider = StateProvider<ChoirPlan?>((ref) => null);

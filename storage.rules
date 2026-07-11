@@ -1,12 +1,75 @@
 rules_version = '2';
-
-// Craft rules based on data in your Firestore database
-// allow write: if firestore.get(
-//    /databases/(default)/documents/users/$(request.auth.uid)).data.isAdmin;
 service firebase.storage {
   match /b/{bucket}/o {
-    match /{allPaths=**} {
-      allow read, write: if false;
+
+    // Cross-service check against the Firestore choir_memberships collection,
+    // matching the app's composite-ID convention ({choirId}_{userId}).
+    // Verified against firebase.google.com/docs/storage/security/rules-conditions:
+    // firestore.get()/firestore.exists() may read up to 2 Firestore documents
+    // per Storage Rules evaluation; every function below resolves to the SAME
+    // document path per choirId, so repeated calls are cached and count as a
+    // single access — well within that limit.
+    function membership(choirId) {
+      return firestore.get(/databases/(default)/documents/choir_memberships/$(choirId + '_' + request.auth.uid)).data;
+    }
+
+    function isChoirMember(choirId) {
+      return request.auth != null &&
+        firestore.exists(/databases/(default)/documents/choir_memberships/$(choirId + '_' + request.auth.uid));
+    }
+
+    function isChoirManagement(choirId) {
+      return isChoirMember(choirId) && membership(choirId).role in ['leader', 'director'];
+    }
+
+    // Mirrors PermissionChecker.canUploadAudio (leader/director, or a
+    // chorister explicitly delegated the 'audio_uploader' permission).
+    function canUploadAudio(choirId) {
+      return isChoirManagement(choirId) ||
+        (isChoirMember(choirId) && 'audio_uploader' in membership(choirId).permissions);
+    }
+
+    // Phase 2b decision: unlike /audio, /scores write access is leader/
+    // director ONLY — no 'score_librarian' delegation, even though
+    // PermissionChecker.canManageScores supports it client-side. See
+    // PHASE_2B_REPORT.md Fix 3 for why (no existing Firestore precedent to
+    // mirror, and no UI currently exercises the delegated path).
+    function canManageScores(choirId) {
+      return isChoirManagement(choirId);
+    }
+
+    // User avatars — own only
+    match /users/{userId}/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Audio parts — choir members read; write requires leader/director role
+    // or the 'audio_uploader' delegated permission, matching the equivalent
+    // Firestore audio_parts collection's create/update/delete rule.
+    match /audio/{choirId}/{allPaths=**} {
+      allow read: if isChoirMember(choirId);
+      allow write: if canUploadAudio(choirId);
+    }
+
+    // Scores — choir members read; write requires leader/director role or
+    // the 'score_librarian' delegated permission (PermissionChecker.
+    // canManageScores). NOTE: firestore.rules has no collection for score
+    // metadata at all today (no `score_attachments` match block — those
+    // documents currently fall through to the deny-all default), so there
+    // was no existing Firestore rule to mirror here; this uses the app's
+    // PermissionChecker model directly. Flagged for Phase 3/4: add a
+    // `score_attachments` collection rule to firestore.rules for consistency.
+    match /scores/{choirId}/{allPaths=**} {
+      allow read: if isChoirMember(choirId);
+      allow write: if canManageScores(choirId);
+    }
+
+    // Chat media — any choir member may read/write, matching chat_messages'
+    // Firestore create rule (isTenantMember only, no role restriction).
+    match /chat/{choirId}/{allPaths=**} {
+      allow read: if isChoirMember(choirId);
+      allow write: if isChoirMember(choirId);
     }
   }
 }

@@ -1,12 +1,42 @@
+import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
+import '../../../core/utils/attendance_ids.dart';
 import '../../../shared/models/enums.dart';
 import '../../../shared/repositories/base_repository.dart';
 import '../domain/models/rehearsal_session.dart';
 import '../../attendance/domain/models/attendance.dart';
 
+class GuestJoinException implements Exception {
+  final String message;
+  GuestJoinException(this.message);
+  @override
+  String toString() => message;
+}
+
+class GuestJoinResult {
+  final String choirId;
+  final String sessionId;
+  final String? title;
+  GuestJoinResult({required this.choirId, required this.sessionId, this.title});
+}
+
 class RehearsalRepository extends BaseRepository {
   final Uuid _uuid = const Uuid();
+
+  // Confirmed project ID: kwayapro-app (see PHASE_2B_REPORT.md — this
+  // previously disagreed with functions/src/index.ts's MTN webhook
+  // callbackUrl, which hardcoded "kwayapro-production"; that's now fixed to
+  // match).
+  //
+  // URL format verified live in Phase 3c: this legacy cloudfunctions.net
+  // address returns the function's own real response (not a 404), same as
+  // its Cloud Run-native *.run.app equivalent — both route to the same
+  // deployed 2nd-gen function. See PHASE_3C_REPORT.md.
+  static const _guestJoinFunctionUrl =
+      'https://us-central1-kwayapro-app.cloudfunctions.net/joinAsGuestDirector';
 
   // Sessions
   Future<RehearsalSession> createSession(RehearsalSession session) async {
@@ -73,18 +103,52 @@ class RehearsalRepository extends BaseRepository {
     return token;
   }
 
-  Future<bool> validateGuestToken(String token) async {
-    final snapshot = await db
-        .collection('rehearsal_sessions')
-        .where('guestToken', isEqualTo: token)
-        .limit(1)
-        .get();
+  // NOTE (Phase 2b): the previous client-side validateGuestToken() +
+  // getSessionByToken() implementation queried rehearsal_sessions by
+  // guestToken directly from Firestore. That was never actually compatible
+  // with choir-scoped security rules: rehearsal_sessions read access requires
+  // isTenantMember(choirId), but a guest, by definition, isn't a member yet —
+  // so this query would already have failed with permission-denied under any
+  // reasonable choir-scoped rules, Phase 2 or not. Both methods have been
+  // replaced by joinAsGuestDirector() below, which performs the equivalent
+  // lookup server-side (Cloud Function + Admin SDK, which bypasses rules)
+  // and also enforces guestTokenExpiry at the moment of grant.
+  Future<GuestJoinResult> joinAsGuestDirector(String token) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      throw GuestJoinException('You must be signed in to accept this invite.');
+    }
+    final idToken = await user.getIdToken();
+    late final http.Response response;
+    try {
+      response = await http.post(
+        Uri.parse(_guestJoinFunctionUrl),
+        headers: {
+          'Authorization': 'Bearer $idToken',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'token': token}),
+      );
+    } catch (_) {
+      throw GuestJoinException('Could not reach the server. Check your connection and try again.');
+    }
 
-    if (snapshot.docs.isEmpty) return false;
+    Map<String, dynamic> body;
+    try {
+      body = jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (_) {
+      throw GuestJoinException('Something went wrong. Please try again.');
+    }
 
-    final data = snapshot.docs.first.data();
-    final expiry = (data['guestTokenExpiry'] as Timestamp).toDate();
-    return DateTime.now().isBefore(expiry);
+    if (response.statusCode != 200) {
+      throw GuestJoinException(body['error'] as String? ?? 'This invite link could not be used.');
+    }
+
+    return GuestJoinResult(
+      choirId: body['choirId'] as String,
+      sessionId: body['sessionId'] as String,
+      title: body['title'] as String?,
+    );
   }
 
   Future<void> revokeGuestToken(String sessionId) async {
@@ -101,7 +165,7 @@ class RehearsalRepository extends BaseRepository {
     required String userId,
     required RSVPStatus status,
   }) async {
-    final docId = '${sessionId}_$userId';
+    final docId = AttendanceIds.compositeId(sessionId, userId);
     await db.collection('attendance').doc(docId).set({
       'sessionId': sessionId,
       'userId': userId,
@@ -111,7 +175,7 @@ class RehearsalRepository extends BaseRepository {
   }
 
   Stream<Attendance?> watchMyRSVP(String sessionId, String userId) {
-    final docId = '${sessionId}_$userId';
+    final docId = AttendanceIds.compositeId(sessionId, userId);
     return db
         .collection('attendance')
         .doc(docId)
@@ -135,23 +199,11 @@ class RehearsalRepository extends BaseRepository {
           };
           
           for (final doc in snapshot.docs) {
-            final rsvp = RSVPStatus.values.byName(doc.data()['rsvp'] as String? ?? 'pending');
+            final rsvp = RSVPStatus.values.asNameMap()[doc.data()['rsvp']] ?? RSVPStatus.pending;
             counts[rsvp] = (counts[rsvp] ?? 0) + 1;
           }
           
           return counts;
         });
-  }
-
-  // Get session by guest token
-  Future<RehearsalSession?> getSessionByToken(String token) async {
-    final snapshot = await db
-        .collection('rehearsal_sessions')
-        .where('guestToken', isEqualTo: token)
-        .limit(1)
-        .get();
-
-    if (snapshot.docs.isEmpty) return null;
-    return RehearsalSession.fromJson(snapshot.docs.first.data());
   }
 }

@@ -22,13 +22,13 @@ class ChoirMembership {
 
   factory ChoirMembership.fromJson(Map<String, dynamic> json) {
     return ChoirMembership(
-      choirId: json['choirId'] as String,
-      userId: json['userId'] as String,
+      choirId: json['choirId'] as String? ?? '',
+      userId: json['userId'] as String? ?? '',
       name: json['name'] as String? ?? 'Unknown Member',
-      role: MemberRole.values.byName(json['role'] as String),
-      defaultVoicePart: VoicePart.values.byName(json['defaultVoicePart'] as String),
-      permissions: List<String>.from(json['permissions'] as List),
-      joinedAt: (json['joinedAt'] as Timestamp).toDate(),
+      role: MemberRole.values.asNameMap()[json['role']] ?? MemberRole.chorister,
+      defaultVoicePart: VoicePart.values.asNameMap()[json['defaultVoicePart']] ?? VoicePart.T,
+      permissions: (json['permissions'] as List?)?.cast<String>() ?? [],
+      joinedAt: (json['joinedAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
     );
   }
 

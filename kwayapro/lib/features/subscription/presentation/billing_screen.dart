@@ -1,7 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../shared/models/enums.dart';
+import '../../auth/domain/auth_providers.dart';
 import '../../choir/domain/choir_providers.dart';
+import '../data/subscription_repository.dart';
+import '../domain/models/subscription.dart';
 import '../domain/subscription_providers.dart';
 
 class BillingScreen extends ConsumerStatefulWidget {
@@ -11,20 +15,36 @@ class BillingScreen extends ConsumerStatefulWidget {
   ConsumerState<BillingScreen> createState() => _BillingScreenState();
 }
 
+enum _PaymentOutcome { success, downgraded, failed, timeout }
+
 class _BillingScreenState extends ConsumerState<BillingScreen> {
   int _currentStep = 0;
   bool _isProcessing = false;
+  _PaymentOutcome? _paymentOutcome;
+  String? _paymentError;
+  StreamSubscription<String?>? _paymentStatusSub;
+  StreamSubscription<Subscription?>? _downgradeWatchSub;
 
-  static const _proDurationDays = 30;
+  static const _proMonthlyAmountUgx = 40000;
+
+  @override
+  void dispose() {
+    _paymentStatusSub?.cancel();
+    _downgradeWatchSub?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final subscriptionAsync = ref.watch(currentSubscriptionProvider);
     final currentPlan = subscriptionAsync.valueOrNull?.plan ?? ChoirPlan.free;
+    final selectedPlan = ref.watch(selectedPlanProvider);
 
     final isOnPro = currentPlan == ChoirPlan.pro;
+    final isDowngrade = selectedPlan == ChoirPlan.free && currentPlan == ChoirPlan.pro;
 
     return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
       appBar: AppBar(title: const Text('Billing'), centerTitle: true),
       body: Stepper(
         currentStep: _currentStep,
@@ -91,9 +111,9 @@ class _BillingScreenState extends ConsumerState<BillingScreen> {
             title: const Text('Processing'),
             content: _ProcessingStep(
               isProcessing: _isProcessing,
-              onComplete: () {
-                setState(() => _currentStep = 4);
-              },
+              isDowngrade: isDowngrade,
+              outcome: _paymentOutcome,
+              errorMessage: _paymentError,
             ),
             isActive: _currentStep >= 3,
             state: _currentStep > 3 ? StepState.complete : StepState.indexed,
@@ -121,7 +141,13 @@ class _BillingScreenState extends ConsumerState<BillingScreen> {
         return;
       }
     } else if (_currentStep == 2) {
-      _processPayment();
+      final plan = ref.read(selectedPlanProvider)!;
+      final currentPlan = ref.read(currentSubscriptionProvider).valueOrNull?.plan ?? ChoirPlan.free;
+      if (plan == ChoirPlan.free && currentPlan == ChoirPlan.pro) {
+        _confirmAndProcessDowngrade();
+      } else {
+        _processPayment();
+      }
       return;
     } else if (_currentStep == 3) {
       Navigator.of(context).pop();
@@ -137,46 +163,191 @@ class _BillingScreenState extends ConsumerState<BillingScreen> {
     }
   }
 
+  // Phase 3 fix: this used to fake success with a Future.delayed and write
+  // the subscription directly from the client — that write was always
+  // rejected by firestore.rules (`allow write: if false` on subscriptions),
+  // it just never surfaced as a visible failure. Now it calls the real
+  // initiatePayment Cloud Function and watches the server-written
+  // payment_requests status for the webhook-driven outcome. Nothing here
+  // ever marks a subscription active client-side.
   Future<void> _processPayment() async {
+    final plan = ref.read(selectedPlanProvider)!;
+
+    if (plan == ChoirPlan.free) {
+      // Already free (or no active subscription) — nothing to charge or
+      // change. The Pro -> Free downgrade path is handled separately by
+      // _confirmAndProcessDowngrade, invoked from _handleStepContinue
+      // before this method is ever reached in that case.
+      setState(() {
+        _currentStep = 3;
+        _isProcessing = false;
+        _paymentOutcome = _PaymentOutcome.success;
+        _paymentError = null;
+      });
+      return;
+    }
+
     setState(() {
       _currentStep = 3;
       _isProcessing = true;
+      _paymentOutcome = null;
+      _paymentError = null;
     });
+
+    await _paymentStatusSub?.cancel();
 
     try {
       final choirId = ref.read(activeChoirIdProvider) ?? '';
-      final plan = ref.read(selectedPlanProvider)!;
       final provider = ref.read(selectedProviderProvider)!;
-      final txRef = 'TX_${DateTime.now().millisecondsSinceEpoch}';
+      final phone = ref.read(currentUserProvider).valueOrNull?.phone ?? '';
+      if (phone.isEmpty) {
+        throw PaymentInitiationException(
+          "We don't have a phone number on file for you. Update your profile and try again.",
+        );
+      }
 
-      final startDate = DateTime.now();
-      final endDate = startDate.add(const Duration(days: _proDurationDays));
-
-      await ref
-          .read(subscriptionRepositoryProvider)
-          .createSubscription(
+      final txRef = await ref.read(subscriptionRepositoryProvider).initiatePayment(
             choirId: choirId,
-            plan: plan,
             provider: provider,
-            startDate: startDate,
-            endDate: endDate,
-            txRef: txRef,
+            phone: phone,
+            amount: _proMonthlyAmountUgx,
           );
 
-      await Future.delayed(const Duration(seconds: 2));
+      // Poll the payment_requests doc for the webhook-driven status update
+      // rather than trusting anything client-side. MTN sends an STK-style
+      // prompt to the user's phone; we wait here for mtnWebhook to record
+      // the outcome once the user approves/rejects it on-device.
+      var settled = false;
+      final timeoutTimer = Timer(const Duration(minutes: 2), () {
+        if (settled || !mounted) return;
+        settled = true;
+        setState(() {
+          _isProcessing = false;
+          _paymentOutcome = _PaymentOutcome.timeout;
+        });
+      });
 
-      await ref
+      _paymentStatusSub = ref
           .read(subscriptionRepositoryProvider)
-          .updateSubscriptionStatus(txRef, SubscriptionStatus.active);
+          .watchPaymentRequestStatus(txRef)
+          .listen((status) {
+        if (settled || status == null || status == 'pending') return;
+        settled = true;
+        timeoutTimer.cancel();
+        if (!mounted) return;
+        setState(() {
+          _isProcessing = false;
+          _paymentOutcome = status == 'completed' ? _PaymentOutcome.success : _PaymentOutcome.failed;
+        });
+      });
+    } on PaymentInitiationException catch (e) {
+      setState(() {
+        _isProcessing = false;
+        _paymentOutcome = _PaymentOutcome.failed;
+        _paymentError = e.message;
+      });
+    } catch (_) {
+      setState(() {
+        _isProcessing = false;
+        _paymentOutcome = _PaymentOutcome.failed;
+        _paymentError = 'Something went wrong starting the payment. Please try again.';
+      });
+    }
+  }
 
-      setState(() => _isProcessing = false);
-    } catch (e) {
-      setState(() => _isProcessing = false);
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Payment failed: $e')));
-      }
+  // Phase 3b Fix B: Pro -> Free downgrade. Shows a confirmation dialog
+  // explaining the consequences (see the dialog copy below for the
+  // reasoning on what happens to songs over the Free cap), then calls the
+  // cancelSubscription Cloud Function and watches the real resulting
+  // subscription state — the same "never assume success client-side"
+  // discipline Fix 4 established for the payment path.
+  Future<void> _confirmAndProcessDowngrade() async {
+    final choir = ref.read(activeChoirProvider).valueOrNull;
+    final songCount = choir?.songCount ?? 0;
+    final overCap = songCount > 3;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Switch to Free plan?'),
+        content: Text(
+          overCap
+              ? "You'll lose Pro features immediately — advanced attendance analytics, "
+                  'score uploads, and priority support. Your choir currently has $songCount '
+                  'songs; all of them stay visible and playable, but you won\'t be able to add '
+                  "new songs until you're back under the Free plan's 3-song limit or upgrade again."
+              : "You'll lose Pro features immediately — advanced attendance analytics, "
+                  'score uploads, and priority support. The Free plan\'s 3-song limit will '
+                  'apply going forward.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Keep Pro'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Switch to Free'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    final choirId = ref.read(activeChoirIdProvider) ?? '';
+
+    setState(() {
+      _currentStep = 3;
+      _isProcessing = true;
+      _paymentOutcome = null;
+      _paymentError = null;
+    });
+
+    await _downgradeWatchSub?.cancel();
+
+    try {
+      await ref.read(subscriptionRepositoryProvider).cancelSubscription(choirId);
+
+      // The Cloud Function writes synchronously before responding, but we
+      // confirm the real resulting state rather than trusting the HTTP 200
+      // alone — a short timeout guards against a delayed/failed write
+      // rather than assuming success or hanging the UI indefinitely.
+      var settled = false;
+      final timeoutTimer = Timer(const Duration(seconds: 10), () {
+        if (settled || !mounted) return;
+        settled = true;
+        setState(() {
+          _isProcessing = false;
+          _paymentOutcome = _PaymentOutcome.timeout;
+        });
+      });
+
+      _downgradeWatchSub = ref
+          .read(subscriptionRepositoryProvider)
+          .watchSubscription(choirId)
+          .listen((subscription) {
+        if (settled || subscription?.status != SubscriptionStatus.cancelled) return;
+        settled = true;
+        timeoutTimer.cancel();
+        if (!mounted) return;
+        setState(() {
+          _isProcessing = false;
+          _paymentOutcome = _PaymentOutcome.downgraded;
+        });
+      });
+    } on PaymentInitiationException catch (e) {
+      setState(() {
+        _isProcessing = false;
+        _paymentOutcome = _PaymentOutcome.failed;
+        _paymentError = e.message;
+      });
+    } catch (_) {
+      setState(() {
+        _isProcessing = false;
+        _paymentOutcome = _PaymentOutcome.failed;
+        _paymentError = 'Something went wrong. Please try again.';
+      });
     }
   }
 }
@@ -352,12 +523,12 @@ class _PaymentMethodStep extends ConsumerWidget {
               PaymentProvider.mtn,
         ),
         const SizedBox(height: 12),
-        _ProviderCard(
+        const _ProviderCard(
           name: 'Airtel Money',
           logo: Icons.signal_cellular_alt_1_bar,
-          isSelected: selectedProvider == PaymentProvider.airtel,
-          onSelect: () => ref.read(selectedProviderProvider.notifier).state =
-              PaymentProvider.airtel,
+          isSelected: false,
+          onSelect: null,
+          badge: 'Coming soon',
         ),
       ],
     );
@@ -368,42 +539,63 @@ class _ProviderCard extends StatelessWidget {
   final String name;
   final IconData logo;
   final bool isSelected;
-  final VoidCallback onSelect;
+  final VoidCallback? onSelect;
+  final String? badge;
 
   const _ProviderCard({
     required this.name,
     required this.logo,
     required this.isSelected,
     required this.onSelect,
+    this.badge,
   });
+
+  bool get _isDisabled => onSelect == null;
 
   @override
   Widget build(BuildContext context) {
+    final outlineColor = Theme.of(context).colorScheme.outline;
     return GestureDetector(
       onTap: onSelect,
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          border: Border.all(
-            color: isSelected
-                ? Theme.of(context).colorScheme.primary
-                : Theme.of(context).colorScheme.outline,
-            width: isSelected ? 2 : 1,
+      child: Opacity(
+        opacity: _isDisabled ? 0.5 : 1,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: isSelected
+                  ? Theme.of(context).colorScheme.primary
+                  : outlineColor,
+              width: isSelected ? 2 : 1,
+            ),
+            borderRadius: BorderRadius.circular(12),
           ),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
-          children: [
-            Icon(logo, size: 32),
-            const SizedBox(width: 16),
-            Text(name, style: Theme.of(context).textTheme.titleMedium),
-            const Spacer(),
-            if (isSelected)
-              Icon(
-                Icons.check_circle,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-          ],
+          child: Row(
+            children: [
+              Icon(logo, size: 32),
+              const SizedBox(width: 16),
+              Text(name, style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(width: 8),
+              if (badge != null)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: outlineColor.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    badge!,
+                    style: Theme.of(context).textTheme.labelSmall,
+                  ),
+                ),
+              const Spacer(),
+              if (isSelected)
+                Icon(
+                  Icons.check_circle,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -415,6 +607,40 @@ class _ConfirmationStep extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final selectedPlan = ref.watch(selectedPlanProvider);
+    final currentPlan = ref.watch(currentSubscriptionProvider).valueOrNull?.plan ?? ChoirPlan.free;
+    final isDowngrade = selectedPlan == ChoirPlan.free && currentPlan == ChoirPlan.pro;
+
+    if (isDowngrade) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Switch to Free Plan',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const Divider(),
+            const _SummaryRow(label: 'Plan', value: 'Free'),
+            const _SummaryRow(label: 'Amount', value: 'UGX 0'),
+            const Divider(),
+            const SizedBox(height: 8),
+            Text(
+              "No payment is involved — you'll be asked to confirm before this takes effect.",
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.outline,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -492,9 +718,16 @@ class _SummaryRow extends StatelessWidget {
 
 class _ProcessingStep extends StatelessWidget {
   final bool isProcessing;
-  final VoidCallback onComplete;
+  final bool isDowngrade;
+  final _PaymentOutcome? outcome;
+  final String? errorMessage;
 
-  const _ProcessingStep({required this.isProcessing, required this.onComplete});
+  const _ProcessingStep({
+    required this.isProcessing,
+    required this.isDowngrade,
+    required this.outcome,
+    required this.errorMessage,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -505,12 +738,12 @@ class _ProcessingStep extends StatelessWidget {
           const CircularProgressIndicator(),
           const SizedBox(height: 24),
           Text(
-            'Processing payment...',
+            isDowngrade ? 'Switching to Free...' : 'Processing payment...',
             style: Theme.of(context).textTheme.titleMedium,
           ),
           const SizedBox(height: 8),
           Text(
-            'Please check your phone for the STK push',
+            isDowngrade ? 'This only takes a moment.' : 'Please check your phone for the STK push',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
               color: Theme.of(context).colorScheme.outline,
             ),
@@ -519,29 +752,97 @@ class _ProcessingStep extends StatelessWidget {
       );
     }
 
-    return Column(
-      children: [
-        const SizedBox(height: 32),
-        Icon(
-          Icons.check_circle,
-          size: 64,
-          color: Theme.of(context).colorScheme.primary,
-        ),
-        const SizedBox(height: 24),
-        Text(
-          'Payment Successful!',
-          style: Theme.of(
-            context,
-          ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Your Pro subscription is now active',
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            color: Theme.of(context).colorScheme.outline,
-          ),
-        ),
-      ],
-    );
+    switch (outcome) {
+      case _PaymentOutcome.failed:
+        return Column(
+          children: [
+            const SizedBox(height: 32),
+            Icon(Icons.error_outline, size: 64, color: Theme.of(context).colorScheme.error),
+            const SizedBox(height: 24),
+            Text(
+              'Payment Failed',
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              errorMessage ?? 'The payment could not be completed. Please try again.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.outline,
+              ),
+            ),
+          ],
+        );
+      case _PaymentOutcome.timeout:
+        return Column(
+          children: [
+            const SizedBox(height: 32),
+            Icon(Icons.hourglass_bottom, size: 64, color: Theme.of(context).colorScheme.outline),
+            const SizedBox(height: 24),
+            Text(
+              'Still Waiting',
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              "We haven't heard back yet. If you approved the prompt on your phone, "
+              'this can take a few minutes — check back shortly.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.outline,
+              ),
+            ),
+          ],
+        );
+      case _PaymentOutcome.downgraded:
+        return Column(
+          children: [
+            const SizedBox(height: 32),
+            Icon(
+              Icons.check_circle,
+              size: 64,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(height: 24),
+            Text(
+              "You're on the Free Plan",
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Your Pro subscription has been cancelled',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.outline,
+              ),
+            ),
+          ],
+        );
+      case _PaymentOutcome.success:
+      case null:
+        return Column(
+          children: [
+            const SizedBox(height: 32),
+            Icon(
+              Icons.check_circle,
+              size: 64,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'Payment Successful!',
+              style: Theme.of(
+                context,
+              ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Your Pro subscription is now active',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: Theme.of(context).colorScheme.outline,
+              ),
+            ),
+          ],
+        );
+    }
   }
 }

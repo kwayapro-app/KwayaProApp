@@ -31,17 +31,21 @@ final activeChoirIdProvider = StateNotifierProvider<ActiveChoirNotifier, String?
   return ActiveChoirNotifier(ref.watch(sharedPrefsProvider));
 });
 
-final activeChoirProvider = StreamProvider<Choir?>((ref) {
+final activeChoirProvider = StreamProvider.autoDispose<Choir?>((ref) {
   final choirId = ref.watch(activeChoirIdProvider);
   if (choirId == null) return Stream.value(null);
-  return ref.watch(choirRepositoryProvider).watchChoir(choirId);
+  final sub = ref.watch(choirRepositoryProvider).watchChoir(choirId);
+  ref.onDispose(() => sub.drain());
+  return sub;
 });
 
-final currentMembershipProvider = StreamProvider<ChoirMembership?>((ref) {
+final currentMembershipProvider = StreamProvider.autoDispose<ChoirMembership?>((ref) {
   final choirId = ref.watch(activeChoirIdProvider);
-  final user = ref.watch(authStateProvider).value;
+  final user = ref.watch(authStateProvider).valueOrNull;
   if (choirId == null || user == null) return Stream.value(null);
-  return ref.watch(choirRepositoryProvider).watchMembership(choirId, user.uid);
+  final sub = ref.watch(choirRepositoryProvider).watchMembership(choirId, user.uid);
+  ref.onDispose(() => sub.drain());
+  return sub;
 });
 
 class ChoirWithMembership {
@@ -50,17 +54,15 @@ class ChoirWithMembership {
   const ChoirWithMembership({required this.choir, required this.membership});
 }
 
-final userChoirsProvider = StreamProvider<List<ChoirWithMembership>>((ref) {
-  final user = ref.watch(authStateProvider).value;
+final userChoirsProvider = StreamProvider.autoDispose<List<ChoirWithMembership>>((ref) {
+  final user = ref.watch(authStateProvider).valueOrNull;
   if (user == null) return Stream.value([]);
 
   final choirRepo = ref.watch(choirRepositoryProvider);
-  
+
   return choirRepo.watchUserMemberships(user.uid).switchMap((memberships) {
     if (memberships.isEmpty) return Stream.value([]);
-    
-    // Create a stream that emits the list of ChoirWithMembership
-    // by combining the latest values from each watchChoir stream.
+
     final choirStreams = memberships.map((m) {
       return choirRepo.watchChoir(m.choirId).map((choir) {
         if (choir == null) return null;
@@ -74,8 +76,20 @@ final userChoirsProvider = StreamProvider<List<ChoirWithMembership>>((ref) {
   });
 });
 
-final choirMembersProvider = StreamProvider<List<ChoirMembership>>((ref) {
+final choirMembersProvider = StreamProvider.autoDispose<List<ChoirMembership>>((ref) {
   final choirId = ref.watch(activeChoirIdProvider);
   if (choirId == null) return Stream.value([]);
-  return ref.watch(choirRepositoryProvider).watchMembers(choirId);
+  final sub = ref.watch(choirRepositoryProvider).watchMembers(choirId);
+  ref.onDispose(() => sub.drain());
+  return sub;
 });
+
+// Phase 5 Fix 4: removed a duplicate `songLibraryProvider` that used to be
+// defined here (raw Firestore query, bypassing SongRepository — flagged in
+// PHASE_2_REPORT.md as a repository-pattern violation and dead-code risk).
+// Nothing actually referenced this copy — planner_screen.dart explicitly
+// imports the real one from song_providers.dart via `show
+// songLibraryProvider`. The two same-named top-level providers compiled
+// fine only because Dart doesn't error on an ambiguous import until the
+// ambiguous name is actually used unqualified; deleting this one resolves
+// the collision outright rather than leaving it as a landmine.

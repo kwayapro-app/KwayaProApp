@@ -24,14 +24,14 @@ class ScoreAttachment {
 
   factory ScoreAttachment.fromJson(Map<String, dynamic> json) {
     return ScoreAttachment(
-      scoreId: json['scoreId'] as String,
-      songId: json['songId'] as String,
-      choirId: json['choirId'] as String,
-      type: ScoreType.values.byName(json['type'] as String),
-      fileUrl: json['fileUrl'] as String,
-      label: json['label'] as String,
-      uploadedBy: json['uploadedBy'] as String,
-      createdAt: (json['createdAt'] as Timestamp).toDate(),
+      scoreId: json['scoreId'] as String? ?? '',
+      songId: json['songId'] as String? ?? '',
+      choirId: json['choirId'] as String? ?? '',
+      type: ScoreType.values.asNameMap()[json['type']] ?? ScoreType.pdf,
+      fileUrl: json['fileUrl'] as String? ?? '',
+      label: json['label'] as String? ?? '',
+      uploadedBy: json['uploadedBy'] as String? ?? '',
+      createdAt: (json['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
     );
   }
 

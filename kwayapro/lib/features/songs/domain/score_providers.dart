@@ -6,6 +6,10 @@ final scoreRepositoryProvider = Provider<ScoreRepository>((ref) {
   return ScoreRepository();
 });
 
-final songScoresProvider = StreamProvider.family<List<ScoreAttachment>, String>((ref, songId) {
-  return ref.read(scoreRepositoryProvider).watchScores(songId);
+// Phase 5 Fix 4: previously not autoDispose — see song_providers.dart for
+// the same fix and reasoning.
+final songScoresProvider = StreamProvider.autoDispose.family<List<ScoreAttachment>, String>((ref, songId) {
+  final sub = ref.watch(scoreRepositoryProvider).watchScores(songId);
+  ref.onDispose(() => sub.drain());
+  return sub;
 });

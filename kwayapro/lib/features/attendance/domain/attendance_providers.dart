@@ -8,24 +8,30 @@ final attendanceRepositoryProvider = Provider<AttendanceRepository>((ref) {
   return AttendanceRepository();
 });
 
-final sessionAttendanceProvider = StreamProvider.family<List<Attendance>, String>((ref, sessionId) {
-  return ref.read(attendanceRepositoryProvider).watchSessionAttendance(sessionId);
+// Phase 5 Fix 4: previously not autoDispose — see song_providers.dart /
+// chat_providers.dart for the same fix and reasoning.
+final sessionAttendanceProvider = StreamProvider.autoDispose.family<List<Attendance>, String>((ref, sessionId) {
+  final sub = ref.watch(attendanceRepositoryProvider).watchSessionAttendance(sessionId);
+  ref.onDispose(() => sub.drain());
+  return sub;
 });
 
-final myAttendanceHistoryProvider = StreamProvider<List<Attendance>>((ref) {
+final myAttendanceHistoryProvider = StreamProvider.autoDispose<List<Attendance>>((ref) {
   final user = ref.watch(authStateProvider).valueOrNull;
   final choirId = ref.watch(activeChoirIdProvider);
   if (user == null || choirId == null) return Stream.value([]);
-  return ref.read(attendanceRepositoryProvider).watchMemberHistory(user.uid, choirId);
+  final sub = ref.watch(attendanceRepositoryProvider).watchMemberHistory(user.uid, choirId);
+  ref.onDispose(() => sub.drain());
+  return sub;
 });
 
-final memberAttendanceRateProvider = FutureProvider.family<double, String>((ref, userId) async {
+final memberAttendanceRateProvider = FutureProvider.autoDispose.family<double, String>((ref, userId) async {
   final choirId = ref.watch(activeChoirIdProvider);
   if (choirId == null) return 0.0;
   return ref.read(attendanceRepositoryProvider).getMemberAttendanceRate(userId, choirId);
 });
 
-final lastSessionAttendanceRateProvider = FutureProvider<double>((ref) async {
+final lastSessionAttendanceRateProvider = FutureProvider.autoDispose<double>((ref) async {
   final choirId = ref.watch(activeChoirIdProvider);
   if (choirId == null) return 0.0;
   return ref.read(attendanceRepositoryProvider).getLastSessionAttendanceRate(choirId);

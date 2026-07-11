@@ -24,16 +24,14 @@ class SongProgram {
 
   factory SongProgram.fromJson(Map<String, dynamic> json) {
     return SongProgram(
-      programId: json['programId'] as String,
-      choirId: json['choirId'] as String,
-      eventName: json['eventName'] as String,
-      eventType: EventType.values.byName(json['eventType'] as String),
-      eventDate: (json['eventDate'] as Timestamp).toDate(),
-      songIds: List<String>.from(json['songIds'] as List),
-      createdBy: json['createdBy'] as String,
-      publishedAt: json['publishedAt'] != null
-          ? (json['publishedAt'] as Timestamp).toDate()
-          : null,
+      programId: json['programId'] as String? ?? '',
+      choirId: json['choirId'] as String? ?? '',
+      eventName: json['eventName'] as String? ?? '',
+      eventType: EventType.values.asNameMap()[json['eventType']] ?? EventType.other,
+      eventDate: (json['eventDate'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      songIds: (json['songIds'] as List?)?.cast<String>() ?? [],
+      createdBy: json['createdBy'] as String? ?? '',
+      publishedAt: (json['publishedAt'] as Timestamp?)?.toDate(),
     );
   }
 

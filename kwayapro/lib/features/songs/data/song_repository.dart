@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import '../../../core/utils/app_logger.dart';
 import '../../../shared/models/enums.dart';
 import '../../../shared/repositories/base_repository.dart';
 import '../domain/models/song.dart';
@@ -6,14 +7,85 @@ import '../domain/models/song_section.dart';
 import '../domain/models/audio_part.dart';
 import '../../choir/domain/models/choir.dart';
 
+class SongLimitExceededException implements Exception {
+  const SongLimitExceededException();
+  @override
+  String toString() => 'This choir has reached the Free plan song limit. Upgrade to Pro to add more.';
+}
+
 class SongRepository extends BaseRepository {
   SongRepository({super.firestore});
 
+  // Phase 4 Fix 1: a single malformed document (e.g. missing a required
+  // field on a legacy doc) used to throw inside fromJson and take down the
+  // entire stream for every listener. Models now default missing fields
+  // instead of hard-casting, but a doc could still fail in a way we haven't
+  // anticipated (e.g. a stale/renamed enum value via .byName) — this wraps
+  // each doc's parse so one bad document is skipped and logged rather than
+  // breaking the stream for every choir member watching it.
+  List<T> _parseSkippingBadDocs<T>(
+    Iterable<QueryDocumentSnapshot<Object?>> docs,
+    T Function(Map<String, dynamic>) fromJson,
+    String collectionName,
+  ) {
+    final result = <T>[];
+    for (final doc in docs) {
+      try {
+        result.add(fromJson(doc.data() as Map<String, dynamic>));
+      } catch (e, stackTrace) {
+        AppLogger.warning(
+          'Skipping malformed $collectionName document ${doc.id}',
+          tag: 'SongRepository',
+          error: e,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    return result;
+  }
+
   // Songs
+  //
+  // Phase 4 Fix 3: previously the freemium limit check (isAtSongLimit, a
+  // plain read) and the count increment (incrementSongCount, a separate
+  // non-transactional write) were two independent steps — two concurrent
+  // creates could both read songCount == 2, both decide they're under the
+  // limit, and both write, landing at songCount == 4 on a free plan.
+  // firestore.rules' isUnderSongLimit check (Phase 3 Fix 5) closes the
+  // "bypass via a direct write that skips the app entirely" hole, but not
+  // this race between two legitimate, app-driven concurrent creates: both
+  // requests could still pass the rule's check against the same
+  // pre-increment songCount before either commit lands.
+  //
+  // Wrapping the read-check-write in a single Firestore transaction closes
+  // this: runTransaction reads choirs/{choirId}.songCount and the song
+  // create + count increment all in one atomic commit. If two transactions
+  // race, Firestore's optimistic-concurrency contention check detects that
+  // the second transaction's read of choirs/{choirId} went stale the moment
+  // the first transaction's commit lands, and automatically retries the
+  // second transaction's callback from scratch — which re-reads the
+  // now-incremented songCount and correctly throws
+  // SongLimitExceededException on the retry instead of proceeding. This is
+  // compatible with the Fix 5 rule, not in conflict with it: the rule's
+  // plain get() (not getAfter()) reads the same last-committed
+  // choirs/{choirId} state this transaction's own read sees, so both layers
+  // agree at commit time — see PHASE_4_REPORT.md for the full trace.
   Future<Song> createSong(Song song) async {
-    final docRef = db.collection('songs').doc(song.songId);
-    await docRef.set(song.toJson());
-    await incrementSongCount(song.choirId);
+    await db.runTransaction((transaction) async {
+      final choirRef = db.collection('choirs').doc(song.choirId);
+      final choirSnap = await transaction.get(choirRef);
+      if (!choirSnap.exists) {
+        throw Exception('Choir not found');
+      }
+      final choir = Choir.fromJson(choirSnap.data()!);
+      if (choir.plan == ChoirPlan.free && choir.songCount >= 3) {
+        throw const SongLimitExceededException();
+      }
+
+      final songRef = db.collection('songs').doc(song.songId);
+      transaction.set(songRef, song.toJson());
+      transaction.update(choirRef, {'songCount': FieldValue.increment(1)});
+    });
     return song;
   }
 
@@ -115,7 +187,7 @@ class SongRepository extends BaseRepository {
         .where('songId', isEqualTo: songId)
         .orderBy('order')
         .snapshots()
-        .map((snapshot) => snapshot.docs.map((doc) => SongSection.fromJson(doc.data())).toList());
+        .map((snapshot) => _parseSkippingBadDocs(snapshot.docs, SongSection.fromJson, 'song_sections'));
   }
 
   // Audio Parts
@@ -134,25 +206,26 @@ class SongRepository extends BaseRepository {
         .collection('audio_parts')
         .where('songId', isEqualTo: songId)
         .snapshots()
-        .map((snapshot) => snapshot.docs.map((doc) => AudioPart.fromJson(doc.data())).toList());
+        .map((snapshot) => _parseSkippingBadDocs(snapshot.docs, AudioPart.fromJson, 'audio_parts'));
   }
 
+  // Phase 5 Fix 5: previously listened to the ENTIRE audio_parts collection
+  // platform-wide with no .where() at all, then did an N+1 per-doc read of
+  // each part's parent song to filter by choirId client-side — cost scaled
+  // with total platform-wide audio parts, not this choir's data, and every
+  // unrelated choir's upload re-triggered the fan-out for every listener
+  // (flagged as the highest-risk finding in the original audit). AudioPart
+  // documents already store choirId directly, so this can be scoped at the
+  // query level with no per-doc lookups at all. (Currently unused by any
+  // screen, but fixed now rather than left as a landmine for whoever wires
+  // up voice-part filtering next.)
   Stream<List<AudioPart>> watchAudioPartsByVoicePart(String choirId, VoicePart voicePartFilter) {
     return db
         .collection('audio_parts')
+        .where('choirId', isEqualTo: choirId)
+        .where('voicePart', isEqualTo: voicePartFilter.name)
         .snapshots()
-        .asyncMap((snapshot) async {
-          final parts = <AudioPart>[];
-          for (final doc in snapshot.docs) {
-            final audioPart = AudioPart.fromJson(doc.data());
-            // Check if this part belongs to the choir
-            final song = await db.collection('songs').doc(audioPart.songId).get();
-            if (song.exists && song.data()?['choirId'] == choirId && audioPart.voicePart == voicePartFilter) {
-              parts.add(audioPart);
-            }
-          }
-          return parts;
-        });
+        .map((snapshot) => _parseSkippingBadDocs(snapshot.docs, AudioPart.fromJson, 'audio_parts'));
   }
 
   // Freemium enforcement
@@ -177,11 +250,15 @@ class SongRepository extends BaseRepository {
   }
 
   // Get audio parts for a specific section
+  // Same malformed-doc risk as the streaming methods above (not explicitly
+  // named in the Phase 4 fix list, but the same fromJson call over
+  // unbounded Firestore data) — applying the same defensive handling here
+  // too rather than leaving this one call site inconsistent.
   Future<List<AudioPart>> getAudioPartsForSection(String sectionId) async {
     final snapshot = await db
         .collection('audio_parts')
         .where('sectionId', isEqualTo: sectionId)
         .get();
-    return snapshot.docs.map((doc) => AudioPart.fromJson(doc.data())).toList();
+    return _parseSkippingBadDocs(snapshot.docs, AudioPart.fromJson, 'audio_parts');
   }
 }

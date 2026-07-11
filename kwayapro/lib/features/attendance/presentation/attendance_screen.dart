@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../../../shared/models/enums.dart';
 import '../../choir/domain/choir_providers.dart';
 import '../../choir/domain/models/choir_membership.dart';
+import '../../../shared/utils/permission_checker.dart';
 import '../../rehearsal/domain/rehearsal_providers.dart';
 import '../domain/attendance_providers.dart';
 import '../domain/models/attendance.dart';
@@ -25,9 +27,11 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen> {
     final rehearsalAsync = ref.watch(upcomingRehearsalsProvider);
 
     return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
       appBar: AppBar(
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
+          tooltip: 'Back',
           onPressed: () => context.pop(),
         ),
         title: attendanceAsync.when(
@@ -52,12 +56,14 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.check_circle),
+            tooltip: 'Save attendance',
             onPressed: _saveAttendance,
           ),
         ],
       ),
       body: Column(
         children: [
+          _OfflineNetworkAlertStrip(),
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(12),
@@ -89,7 +95,7 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen> {
 
   Widget _buildBatchActionRow() {
     final membership = ref.watch(currentMembershipProvider).valueOrNull;
-    if (membership == null || membership.role == MemberRole.chorister) {
+    if (membership == null || !PermissionChecker(membership).isManagement) {
       return const SizedBox.shrink();
     }
 
@@ -432,5 +438,55 @@ class _VoicePartOverrideSheet extends ConsumerWidget {
         );
       }
     }
+  }
+}
+
+class _OfflineNetworkAlertStrip extends StatefulWidget {
+  @override
+  State<_OfflineNetworkAlertStrip> createState() => _OfflineNetworkAlertStripState();
+}
+
+class _OfflineNetworkAlertStripState extends State<_OfflineNetworkAlertStrip> {
+  bool _isOffline = false;
+
+  @override
+  void initState() {
+    super.initState();
+    Connectivity().checkConnectivity().then((result) {
+      if (mounted) setState(() => _isOffline = result.contains(ConnectivityResult.none));
+    });
+    Connectivity().onConnectivityChanged.listen((result) {
+      if (mounted) setState(() => _isOffline = result.contains(ConnectivityResult.none));
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedCrossFade(
+      firstChild: const SizedBox.shrink(),
+      secondChild: Container(
+        width: double.infinity,
+        color: Theme.of(context).colorScheme.errorContainer,
+        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.cloud_off, size: 16, color: Theme.of(context).colorScheme.onErrorContainer),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                "You're offline. Attendance changes will sync when reconnected.",
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onErrorContainer,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      crossFadeState: _isOffline ? CrossFadeState.showSecond : CrossFadeState.showFirst,
+      duration: const Duration(milliseconds: 300),
+    );
   }
 }

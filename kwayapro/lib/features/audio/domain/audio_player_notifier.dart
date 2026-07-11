@@ -1,8 +1,13 @@
+import 'dart:async';
+
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
 import '../data/audio_repository.dart';
 import '../../songs/domain/models/song.dart';
 import '../../songs/domain/models/audio_part.dart';
+import '../../../shared/services/audio_cache_service.dart';
 
 class AudioPlayerState {
   final AudioPart? currentPart;
@@ -64,6 +69,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
   }
 
   AudioPlayer get _player => ref.read(_audioPlayerProvider);
+  AudioCacheService get _audioCache => ref.read(audioCacheServiceProvider);
 
   void _checkDisposed() {
     if (_isDisposed) {
@@ -71,6 +77,14 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
     }
   }
 
+  // Phase 5b: wires the previously-unused AudioCacheService into the actual
+  // playback path. Cache is checked first (works offline, and skips the
+  // network entirely on repeat plays); on a cache miss, plays by
+  // progressively streaming from the remote URL as before (unchanged
+  // first-byte latency), then downloads the full track in the background
+  // to cache it for next time. If offline AND not cached, fails with a
+  // plain-English message per PRD 9.3 instead of letting just_audio's
+  // network error surface raw, or hanging.
   Future<void> play(AudioPart part, Song song) async {
     _checkDisposed();
     try {
@@ -79,12 +93,55 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
         currentSong: song,
         isLoading: true,
         position: Duration.zero,
+        error: null,
       );
-      
+
+      final cachedPath = await _audioCache.getCachedPath(part.audioUrl);
+      if (cachedPath != null) {
+        await _player.setFilePath(cachedPath);
+        await _player.play();
+        state = state.copyWith(isLoading: false);
+        return;
+      }
+
+      // One-shot check (not the stream-based connectivityProvider) to
+      // guarantee a fresh value at play-time rather than racing an
+      // as-yet-unpopulated stream — matches the pattern already used in
+      // attendance_repository.dart for the same reason.
+      final connectivity = await Connectivity().checkConnectivity();
+      if (connectivity.contains(ConnectivityResult.none)) {
+        state = state.copyWith(
+          isLoading: false,
+          error: "This track hasn't been downloaded yet, and you're offline. "
+              'Connect to the internet to play it for the first time.',
+        );
+        return;
+      }
+
       await _player.setUrl(part.audioUrl);
       await _player.play();
+      state = state.copyWith(isLoading: false);
+
+      unawaited(_cacheInBackground(part.audioUrl));
     } catch (e) {
-      state = state.copyWith(error: e.toString(), isLoading: false);
+      state = state.copyWith(
+        error: "Couldn't play this track. Check your connection and try again.",
+        isLoading: false,
+      );
+    }
+  }
+
+  Future<void> _cacheInBackground(String url) async {
+    try {
+      if (await _audioCache.getCachedPath(url) != null) return;
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200) {
+        await _audioCache.cacheAudio(url, response.bodyBytes);
+      }
+    } catch (_) {
+      // Best-effort — playback already succeeded via streaming; failing to
+      // cache just means this track streams again next time instead of
+      // playing from disk. Not surfaced to the user.
     }
   }
 

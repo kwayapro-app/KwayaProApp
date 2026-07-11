@@ -16,7 +16,7 @@ enum MessageType { text, audio, image }
 
 enum PaymentProvider { mtn, airtel }
 
-enum SubscriptionStatus { active, expired, pending }
+enum SubscriptionStatus { active, expired, pending, cancelled }
 
 extension VoicePartX on VoicePart {
   String get displayName => switch (this) {

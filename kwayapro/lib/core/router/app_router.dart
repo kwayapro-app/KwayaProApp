@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:animations/animations.dart';
@@ -23,8 +24,40 @@ import '../../features/attendance/presentation/attendance_screen.dart';
 import '../../features/planner/presentation/planner_screen.dart' show PlannerScreen, ProgramEditorScreen;
 import 'navigation_shell_screen.dart';
 
+// Phase 5 Fix 1: previously routerProvider was a plain Provider<GoRouter>
+// that `ref.watch`ed authStateProvider/userChoirsProvider/currentUserProvider
+// directly — meaning Riverpod discarded and rebuilt the ENTIRE GoRouter
+// instance (and therefore MaterialApp.router's routerConfig) on every single
+// emission from any of those three streams, not just sign-in/out. Since
+// StatefulShellRoute's tab state (scroll position, nested navigator stacks)
+// lives inside the GoRouter/Navigator tree, discarding the router discards
+// that state too — e.g. a Firestore snapshot update to the user doc while
+// someone is scrolled deep into a tab would silently reset it.
+//
+// Fixed per go_router's documented refreshListenable pattern
+// (pub.dev/documentation/go_router — GoRouter(refreshListenable: Listenable?)):
+// construct GoRouter exactly once, and instead pass a stable ChangeNotifier
+// that calls notifyListeners() when the underlying auth/choir state changes.
+// go_router re-runs `redirect` on every notifyListeners() call without
+// discarding the router or its navigator state.
+class _RouterRefreshNotifier extends ChangeNotifier {
+  _RouterRefreshNotifier(Ref ref) {
+    ref.listen(authStateProvider, (_, __) => notifyListeners());
+    ref.listen(userChoirsProvider, (_, __) => notifyListeners());
+    ref.listen(currentUserProvider, (_, __) => notifyListeners());
+  }
+}
+
+final _routerRefreshProvider = Provider<_RouterRefreshNotifier>((ref) {
+  final notifier = _RouterRefreshNotifier(ref);
+  ref.onDispose(notifier.dispose);
+  return notifier;
+});
+
 final routerProvider = Provider<GoRouter>((ref) {
-  final authState = ref.watch(authStateProvider);
+  // Only dependency routerProvider itself watches — the notifier's identity
+  // never changes across its lifetime, so this build only ever runs once.
+  final refreshNotifier = ref.watch(_routerRefreshProvider);
 
   // Shell transition helper for shared axis
   CustomTransitionPage<T> buildSharedAxisPage<T>({
@@ -47,8 +80,16 @@ final routerProvider = Provider<GoRouter>((ref) {
 
   return GoRouter(
     initialLocation: '/onboarding',
-    debugLogDiagnostics: true,
+    debugLogDiagnostics: kDebugMode,
+    refreshListenable: refreshNotifier,
     redirect: (context, state) {
+      // redirect is re-invoked on every navigation AND every
+      // refreshListenable notification — read the latest provider values
+      // fresh each time rather than closing over stale ones.
+      final authState = ref.read(authStateProvider);
+      final userChoirs = ref.read(userChoirsProvider);
+      final currentUser = ref.read(currentUserProvider);
+
       final isAuth = authState.value != null;
       final isOnboarding = state.uri.path.startsWith('/onboarding');
 
@@ -58,7 +99,20 @@ final routerProvider = Provider<GoRouter>((ref) {
       if (isGoingToJoin || isGoingToRehearsalInvite) return null;
 
       if (!isAuth && !isOnboarding) return '/onboarding';
-      if (isAuth && isOnboarding) return '/home';
+
+      // Only redirect away from onboarding if the user has explicitly
+      // completed step 5 (the onboardingComplete flag is set in Firestore).
+      if (isAuth && isOnboarding) {
+        final choirs = userChoirs.value;
+        final user = currentUser.value;
+        // Still loading data — let them stay
+        if (choirs == null || user == null) return null;
+        // Onboarding complete — send to home
+        if (user.onboardingComplete) return '/home';
+        // Mid-onboarding — let them finish
+        return null;
+      }
+
       return null;
     },
     routes: [
@@ -381,23 +435,20 @@ class _RehearsalInviteScreenState extends ConsumerState<_RehearsalInviteScreen> 
         if (mounted) context.pushReplacement('/onboarding');
         return;
       }
+      // Token validation, expiry enforcement, and the membership grant all
+      // now happen server-side in the joinAsGuestDirector Cloud Function —
+      // see PHASE_2B_REPORT.md. The client can no longer read
+      // rehearsal_sessions by guestToken directly (it isn't a tenant member
+      // yet), so this single call replaces the old
+      // validateGuestToken + getSessionByToken + addGuestDirector sequence.
       final repo = RehearsalRepository();
-      final valid = await repo.validateGuestToken(widget.token);
-      if (!valid && mounted) {
-        setState(() { _isValidating = false; _error = 'This invite link has expired or is invalid.'; });
-        return;
-      }
-      final session = await repo.getSessionByToken(widget.token);
-      if (session != null && mounted) {
-        final choirRepo = ChoirRepository();
-        await choirRepo.addGuestDirector(session.choirId, user.uid, session.sessionId);
-        ref.read(activeChoirIdProvider.notifier).setChoir(session.choirId);
-        setState(() { _isValidating = false; });
-      } else if (mounted) {
-        setState(() { _isValidating = false; _error = 'Session not found.'; });
-      }
-    } catch (e) {
-      if (mounted) setState(() { _isValidating = false; _error = 'Error: $e'; });
+      final result = await repo.joinAsGuestDirector(widget.token);
+      ref.read(activeChoirIdProvider.notifier).setChoir(result.choirId);
+      if (mounted) setState(() { _isValidating = false; });
+    } on GuestJoinException catch (e) {
+      if (mounted) setState(() { _isValidating = false; _error = e.message; });
+    } catch (_) {
+      if (mounted) setState(() { _isValidating = false; _error = 'Something went wrong. Please try again.'; });
     }
   }
 
@@ -429,7 +480,7 @@ class _RehearsalInviteScreenState extends ConsumerState<_RehearsalInviteScreen> 
               else
                 Column(
                   children: [
-                    Icon(Icons.check_circle, size: 64, color: Colors.green),
+                    const Icon(Icons.check_circle, size: 64, color: Colors.green),
                     const SizedBox(height: 16),
                     Text('You\'re in!', style: theme.textTheme.titleLarge),
                     const SizedBox(height: 8),

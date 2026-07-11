@@ -3,6 +3,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:kwayapro/features/auth/domain/models/app_user.dart';
 import 'package:kwayapro/features/choir/domain/models/choir.dart';
 import 'package:kwayapro/features/songs/domain/models/song.dart';
+import 'package:kwayapro/features/songs/domain/models/audio_part.dart';
+import 'package:kwayapro/features/songs/domain/models/score_attachment.dart';
+import 'package:kwayapro/features/songs/domain/models/song_section.dart';
 import 'package:kwayapro/shared/models/enums.dart';
 
 void main() {
@@ -113,6 +116,109 @@ void main() {
       final tojson = song.toJson();
       expect(tojson['language'], 'English');
       expect(tojson['createdAt'], isA<Timestamp>());
+    });
+  });
+
+  // Phase 4 Fix 1: these three models previously hard-cast every field
+  // (`json['x'] as String`, `as Timestamp`, etc.) with no fallback — a
+  // document missing any field would throw inside fromJson, which
+  // song_repository.dart's watchSections/watchAudioParts/
+  // watchAudioPartsByVoicePart mapped with no per-doc error handling,
+  // taking down the entire stream for every listener on one bad document.
+  // These tests confirm the fix: a document missing required fields no
+  // longer throws, matching every other model in the codebase.
+  group('AudioPart Model (Phase 4 Fix 1)', () {
+    test('fromJson handles a document missing every field without throwing', () {
+      final part = AudioPart.fromJson(const {});
+
+      expect(part.audioPartId, '');
+      expect(part.sectionId, '');
+      expect(part.songId, '');
+      expect(part.choirId, '');
+      expect(part.voicePart, VoicePart.S);
+      expect(part.audioUrl, '');
+      expect(part.durationSeconds, 0);
+      expect(part.uploadedBy, '');
+      expect(part.createdAt, isA<DateTime>());
+    });
+
+    test('fromJson and toJson with valid data', () {
+      final now = DateTime.now();
+      final json = {
+        'audioPartId': 'ap1',
+        'sectionId': 'sec1',
+        'songId': 'song1',
+        'choirId': 'choir1',
+        'voicePart': 'A',
+        'audioUrl': 'https://example.com/a.m4a',
+        'durationSeconds': 120,
+        'uploadedBy': 'user1',
+        'createdAt': Timestamp.fromDate(now),
+      };
+      final part = AudioPart.fromJson(json);
+      expect(part.audioPartId, 'ap1');
+      expect(part.voicePart, VoicePart.A);
+      expect(part.durationSeconds, 120);
+    });
+  });
+
+  group('ScoreAttachment Model (Phase 4 Fix 1)', () {
+    test('fromJson handles a document missing every field without throwing', () {
+      final score = ScoreAttachment.fromJson(const {});
+
+      expect(score.scoreId, '');
+      expect(score.songId, '');
+      expect(score.choirId, '');
+      expect(score.type, ScoreType.pdf);
+      expect(score.fileUrl, '');
+      expect(score.label, '');
+      expect(score.uploadedBy, '');
+      expect(score.createdAt, isA<DateTime>());
+    });
+
+    test('fromJson and toJson with valid data', () {
+      final now = DateTime.now();
+      final json = {
+        'scoreId': 's1',
+        'songId': 'song1',
+        'choirId': 'choir1',
+        'type': 'image',
+        'fileUrl': 'https://example.com/s.jpg',
+        'label': 'Lead sheet',
+        'uploadedBy': 'user1',
+        'createdAt': Timestamp.fromDate(now),
+      };
+      final score = ScoreAttachment.fromJson(json);
+      expect(score.scoreId, 's1');
+      expect(score.type, ScoreType.image);
+    });
+  });
+
+  group('SongSection Model (Phase 4 Fix 1)', () {
+    test('fromJson handles a document missing every field without throwing', () {
+      final section = SongSection.fromJson(const {});
+
+      expect(section.sectionId, '');
+      expect(section.songId, '');
+      expect(section.choirId, '');
+      expect(section.title, '');
+      expect(section.order, 0);
+      expect(section.status, SectionStatus.comingSoon);
+    });
+
+    test('fromJson and toJson with valid data', () {
+      final json = {
+        'sectionId': 'sec1',
+        'songId': 'song1',
+        'choirId': 'choir1',
+        'title': 'Verse 1',
+        'order': 2,
+        'status': 'ready',
+      };
+      final section = SongSection.fromJson(json);
+      expect(section.sectionId, 'sec1');
+      expect(section.order, 2);
+      expect(section.status, SectionStatus.ready);
     });
   });
 }

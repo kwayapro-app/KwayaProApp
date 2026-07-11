@@ -24,6 +24,10 @@ class UserRepository extends BaseRepository {
     await db.collection('users').doc(userId).update(fields);
   }
 
+  Future<void> markOnboardingComplete(String userId) async {
+    await db.collection('users').doc(userId).update({'onboardingComplete': true});
+  }
+
   Stream<AppUser?> watchUser(String userId) {
     return _usersRef.doc(userId).snapshots().map((snapshot) => snapshot.data());
   }

@@ -8,7 +8,9 @@ import '../../audio/domain/audio_player_notifier.dart';
 import '../../audio/presentation/widgets/mini_player_bar.dart';
 import '../../audio/data/audio_repository.dart';
 import '../../choir/domain/choir_providers.dart';
+import '../../../shared/utils/permission_checker.dart';
 import '../../auth/domain/auth_providers.dart';
+import '../data/song_repository.dart' show SongLimitExceededException;
 import '../domain/song_providers.dart';
 import '../domain/models/song.dart';
 import '../domain/models/song_section.dart';
@@ -39,7 +41,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     final filterPart = ref.watch(libraryFilterProvider);
     final membership = ref.watch(currentMembershipProvider).valueOrNull;
     final userVoicePart = membership?.defaultVoicePart;
-    final isManagement = membership?.role == MemberRole.leader || membership?.role == MemberRole.director;
+    final isManagement = PermissionChecker(membership).isManagement;
     
     return Scaffold(
       body: Column(
@@ -504,7 +506,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
               TextField(controller: keyCtrl, decoration: const InputDecoration(labelText: 'Key (optional)', hintText: 'e.g. Bb, C, Dm')),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
-                value: category,
+                initialValue: category,
                 decoration: const InputDecoration(labelText: 'Category'),
                 items: ['Worship', 'Praise', 'Offertory', 'Communion', 'Other']
                     .map((c) => DropdownMenuItem(value: c, child: Text(c)))
@@ -513,7 +515,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
-                value: language,
+                initialValue: language,
                 decoration: const InputDecoration(labelText: 'Language'),
                 items: ['English', 'Swahili', 'Luganda', 'Latin', 'Other']
                     .map((l) => DropdownMenuItem(value: l, child: Text(l)))
@@ -529,6 +531,13 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         ],
       ),
     );
+    // Phase 5 Fix 3 (adjacent finding): these two controllers back the
+    // dialog's TextFields but were never disposed — a small leak on every
+    // "New Song" dialog open. Not the build()-recreation bug class Fix 3
+    // was scoped to (this method isn't build()), but the same lifecycle
+    // hygiene concern.
+    titleCtrl.dispose();
+    keyCtrl.dispose();
 
     if (result == null || !mounted) return;
     final title = result['title'] as String? ?? '';
@@ -591,6 +600,11 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         }
       } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Song created. Add audio parts from the song menu.')));
+      }
+    } on SongLimitExceededException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+        context.push('/billing');
       }
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to create song: $e')));

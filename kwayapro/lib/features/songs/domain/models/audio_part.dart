@@ -26,15 +26,23 @@ class AudioPart {
 
   factory AudioPart.fromJson(Map<String, dynamic> json) {
     return AudioPart(
-      audioPartId: json['audioPartId'] as String,
-      sectionId: json['sectionId'] as String,
-      songId: json['songId'] as String,
-      choirId: json['choirId'] as String,
-      voicePart: VoicePart.values.byName(json['voicePart'] as String),
-      audioUrl: json['audioUrl'] as String,
-      durationSeconds: json['durationSeconds'] as int,
-      uploadedBy: json['uploadedBy'] as String,
-      createdAt: (json['createdAt'] as Timestamp).toDate(),
+      audioPartId: json['audioPartId'] as String? ?? '',
+      sectionId: json['sectionId'] as String? ?? '',
+      songId: json['songId'] as String? ?? '',
+      choirId: json['choirId'] as String? ?? '',
+      // Phase 7 note: deliberately kept as byName() (throws on an
+      // unrecognized value) rather than the asNameMap() hygiene pattern used
+      // elsewhere — SongRepository's _parseSkippingBadDocs (Phase 4 Fix 1)
+      // relies on this throwing so the whole malformed doc is skipped and
+      // logged, rather than silently kept with a defaulted voicePart that
+      // could put an audio part in the wrong voice section.
+      voicePart: json['voicePart'] != null
+          ? VoicePart.values.byName(json['voicePart'] as String)
+          : VoicePart.S,
+      audioUrl: json['audioUrl'] as String? ?? '',
+      durationSeconds: json['durationSeconds'] as int? ?? 0,
+      uploadedBy: json['uploadedBy'] as String? ?? '',
+      createdAt: (json['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
     );
   }
 

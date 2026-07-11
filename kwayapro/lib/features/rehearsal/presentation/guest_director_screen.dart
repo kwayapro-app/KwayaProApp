@@ -37,6 +37,7 @@ class _GuestDirectorScreenState extends ConsumerState<GuestDirectorScreen> {
         session!.guestTokenExpiry!.isAfter(DateTime.now());
 
     return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
       appBar: AppBar(
         title: const Text('Guest Director'),
         leading: IconButton(
@@ -190,7 +191,16 @@ class _GuestDirectorScreenState extends ConsumerState<GuestDirectorScreen> {
     
     try {
       final token = await ref.read(rehearsalRepositoryProvider).generateGuestToken(widget.sessionId);
-      final link = 'https://kwayapro.page.link/rehearsal-invite/$token';
+      // Phase 6 Fix 2: this previously pointed at a Firebase Dynamic Links
+      // (*.page.link) URL — that product was shut down 2025-08-25 (all
+      // *.page.link links have returned HTTP 404 since), so every invite
+      // generated via this screen has been dead on arrival regardless of
+      // any App Links configuration. Switched to the app's own Android App
+      // Links domain (kwayapro.app, declared in AndroidManifest.xml and
+      // matching app_router.dart's /rehearsal-invite/:token route), which
+      // is what should have been used from the start rather than a
+      // separate third-party-style link shortener.
+      final link = 'https://kwayapro.app/rehearsal-invite/$token';
       
       await Share.share(
         'You\'ve been invited as Guest Director for this rehearsal.\n\nTap to join: $link',
@@ -210,8 +220,11 @@ class _GuestDirectorScreenState extends ConsumerState<GuestDirectorScreen> {
   void _shareLink(RehearsalSession session) async {
     final token = session.guestToken;
     if (token == null) return;
-    
-    final link = 'https://kwayapro.page.link/rehearsal-invite/$token';
+
+    // See _generateAndShare above — kwayapro.page.link (Firebase Dynamic
+    // Links) has been dead since 2025-08-25; using the app's real App
+    // Links domain instead.
+    final link = 'https://kwayapro.app/rehearsal-invite/$token';
     
     await Share.share(
       'You\'ve been invited as Guest Director for this rehearsal.\n\nTap to join: $link',

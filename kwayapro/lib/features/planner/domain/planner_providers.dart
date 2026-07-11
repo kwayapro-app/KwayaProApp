@@ -7,18 +7,22 @@ final plannerRepositoryProvider = Provider<PlannerRepository>((ref) {
   return PlannerRepository();
 });
 
-final songProgramsProvider = StreamProvider<List<SongProgram>>((ref) {
+// Phase 5 Fix 4: previously not autoDispose — see song_providers.dart for
+// the same fix and reasoning.
+final songProgramsProvider = StreamProvider.autoDispose<List<SongProgram>>((ref) {
   final choirId = ref.watch(activeChoirIdProvider);
   if (choirId == null) return Stream.value([]);
-  return ref.read(plannerRepositoryProvider).watchPrograms(choirId);
+  final sub = ref.watch(plannerRepositoryProvider).watchPrograms(choirId);
+  ref.onDispose(() => sub.drain());
+  return sub;
 });
 
-final publishedProgramsProvider = StreamProvider<List<SongProgram>>((ref) {
+final publishedProgramsProvider = StreamProvider.autoDispose<List<SongProgram>>((ref) {
   final programs = ref.watch(songProgramsProvider).valueOrNull ?? [];
   return Stream.value(programs.where((p) => p.publishedAt != null).toList());
 });
 
-final draftProgramsProvider = StreamProvider<List<SongProgram>>((ref) {
+final draftProgramsProvider = StreamProvider.autoDispose<List<SongProgram>>((ref) {
   final programs = ref.watch(songProgramsProvider).valueOrNull ?? [];
   return Stream.value(programs.where((p) => p.publishedAt == null).toList());
 });

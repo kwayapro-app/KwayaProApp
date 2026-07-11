@@ -105,19 +105,20 @@ class AudioRepository extends BaseRepository {
   }
 
   // Get listen events for a choir (for Pro analytics)
+  //
+  // Phase 5 Fix 5: previously listened to the ENTIRE listen_events
+  // collection platform-wide with no .where() at all, then did an N+1
+  // per-doc read of each event's parent song to filter by choirId
+  // client-side — same unbounded-listener pattern as
+  // SongRepository.watchAudioPartsByVoicePart, and the sibling method just
+  // above (watchListenEvents) already shows listen_events documents carry
+  // queryable fields directly, so this scopes the same way. Currently
+  // unused by any screen, but fixed now rather than left as a landmine.
   Stream<List<Map<String, dynamic>>> watchChoirListenEvents(String choirId) {
     return db
         .collection('listen_events')
+        .where('choirId', isEqualTo: choirId)
         .snapshots()
-        .asyncMap((snapshot) async {
-          final events = <Map<String, dynamic>>[];
-          for (final doc in snapshot.docs) {
-            final songDoc = await db.collection('songs').doc(doc.data()['songId'] as String).get();
-            if (songDoc.exists && songDoc.data()?['choirId'] == choirId) {
-              events.add(doc.data());
-            }
-          }
-          return events;
-        });
+        .map((snapshot) => snapshot.docs.map((doc) => doc.data()).toList());
   }
 }

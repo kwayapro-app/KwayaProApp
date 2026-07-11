@@ -14,10 +14,12 @@ import '../../choir/domain/choir_providers.dart';
 import '../../songs/domain/models/audio_part.dart';
 import '../../songs/data/song_repository.dart';
 import '../../audio/data/audio_repository.dart';
+import '../../../core/utils/app_logger.dart';
+import '../domain/low_latency_piano_engine.dart';
 
 class StudioScreen extends ConsumerStatefulWidget {
   final StudioContext? context;
-  
+
   const StudioScreen({super.key, this.context});
 
   @override
@@ -26,48 +28,75 @@ class StudioScreen extends ConsumerStatefulWidget {
 
 class _StudioScreenState extends ConsumerState<StudioScreen> with TickerProviderStateMixin {
   late AudioRecorder _recorder;
-  AudioPlayer? _keyPlayer;
+  late LowLatencyPianoEngine _pianoEngine;
   AudioPlayer? _metronomePlayer;
-  
+
   bool _isRecording = false;
   Duration _recordingDuration = Duration.zero;
   Timer? _recordingTimer;
   double _amplitude = 0.0;
-  
+
   int _bpm = 80;
   bool _isMetronomePlaying = false;
   Timer? _metronomeTimer;
-  
+
   final ScrollController _pianoScrollController = ScrollController();
-  
+
   VoicePart _selectedVoicePart = VoicePart.A;
   bool _isSustain = false;
-  String? _sustainedNote;
-  
+
   String? _songId;
   String? _songTitle;
   String? _sectionId;
   String? _sectionTitle;
   String? _selectedKey;
-  
+
   double _uploadProgress = 0.0;
   bool _isUploading = false;
+
+  static const double _whiteKeyWidth = 60.0;
+  static const double _blackKeyWidth = 42.0;
+
+  static const List<_WhiteKeyDef> _whiteKeys = [
+    _WhiteKeyDef('C3', 0), _WhiteKeyDef('D3', 1), _WhiteKeyDef('E3', 2),
+    _WhiteKeyDef('F3', 3), _WhiteKeyDef('G3', 4), _WhiteKeyDef('A3', 5),
+    _WhiteKeyDef('B3', 6), _WhiteKeyDef('C4', 7), _WhiteKeyDef('D4', 8),
+    _WhiteKeyDef('E4', 9), _WhiteKeyDef('F4', 10), _WhiteKeyDef('G4', 11),
+    _WhiteKeyDef('A4', 12), _WhiteKeyDef('B4', 13), _WhiteKeyDef('C5', 14),
+    _WhiteKeyDef('D5', 15), _WhiteKeyDef('E5', 16), _WhiteKeyDef('F5', 17),
+    _WhiteKeyDef('G5', 18), _WhiteKeyDef('A5', 19), _WhiteKeyDef('B5', 20),
+  ];
+
+  static const List<_BlackKeyDef> _blackKeys = [
+    _BlackKeyDef('C#3', 0), _BlackKeyDef('D#3', 1),
+    _BlackKeyDef('F#3', 3), _BlackKeyDef('G#3', 4), _BlackKeyDef('A#3', 5),
+    _BlackKeyDef('C#4', 7), _BlackKeyDef('D#4', 8),
+    _BlackKeyDef('F#4', 10), _BlackKeyDef('G#4', 11), _BlackKeyDef('A#4', 12),
+    _BlackKeyDef('C#5', 14), _BlackKeyDef('D#5', 15),
+    _BlackKeyDef('F#5', 17), _BlackKeyDef('G#5', 18), _BlackKeyDef('A#5', 19),
+  ];
 
   @override
   void initState() {
     super.initState();
     _recorder = AudioRecorder();
-    _keyPlayer = AudioPlayer();
+    _pianoEngine = LowLatencyPianoEngine();
     _metronomePlayer = AudioPlayer();
     _lockOrientation();
-    
+
+    final allNotes = [
+      ..._whiteKeys.map((k) => k.note),
+      ..._blackKeys.map((k) => k.note),
+    ];
+    _pianoEngine.initializeNotes(allNotes);
+
     if (widget.context != null) {
       _songId = widget.context!.songId;
       _songTitle = widget.context!.songTitle;
       _sectionId = widget.context!.sectionId;
       _sectionTitle = widget.context!.sectionTitle;
       _selectedVoicePart = widget.context!.voicePart;
-      _scrollToVoicePartRange();
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToVoicePartRange());
     }
   }
 
@@ -77,7 +106,6 @@ class _StudioScreenState extends ConsumerState<StudioScreen> with TickerProvider
       DeviceOrientation.landscapeRight,
     ]);
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersive);
-    setState(() {});
   }
 
   Future<void> _restoreOrientation() async {
@@ -86,36 +114,38 @@ class _StudioScreenState extends ConsumerState<StudioScreen> with TickerProvider
   }
 
   void _scrollToVoicePartRange() {
-    final targetOctave = switch (_selectedVoicePart) {
-      VoicePart.S => 5,
-      VoicePart.A => 4,
-      VoicePart.T => 4,
-      VoicePart.B => 3,
-    };
-    
-    final offset = (targetOctave - 3) * 392.0;
-    _pianoScrollController.animateTo(
-      offset.clamp(0.0, _pianoScrollController.position.maxScrollExtent),
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOut,
-    );
+    double offset = 0.0;
+    switch (_selectedVoicePart) {
+      case VoicePart.S: offset = 7 * _whiteKeyWidth; break;
+      case VoicePart.T: offset = 0; break;
+      case VoicePart.B: offset = 0; break;
+      case VoicePart.A: offset = 4 * _whiteKeyWidth; break;
+    }
+    if (_pianoScrollController.hasClients) {
+      _pianoScrollController.animateTo(
+        offset.clamp(0.0, _pianoScrollController.position.maxScrollExtent),
+        duration: const Duration(milliseconds: 400),
+        curve: Curves.easeInOutCubic,
+      );
+    }
   }
 
   @override
   void dispose() {
     _restoreOrientation();
     _recorder.dispose();
-    _keyPlayer?.dispose();
+    _pianoEngine.dispose();
     _metronomePlayer?.dispose();
     _recordingTimer?.cancel();
     _metronomeTimer?.cancel();
+    _pianoScrollController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    
+
     return Scaffold(
       backgroundColor: const Color(0xFF15120B),
       body: SafeArea(
@@ -313,19 +343,33 @@ class _StudioScreenState extends ConsumerState<StudioScreen> with TickerProvider
           controller: _pianoScrollController,
           scrollDirection: Axis.horizontal,
           child: SizedBox(
-            width: 21 * 56.0,
+            width: _whiteKeys.length * _whiteKeyWidth,
             height: 150,
-            child: Row(
-              children: List.generate(21, (index) {
-                final whiteNotes = ['C3','D3','E3','F3','G3','A3','B3','C4','D4','E4','F4','G4','A4','B4','C5','D5','E5','F5','G5','A5','B5'];
-                return _buildWhiteKey(whiteNotes[index], index);
-              }),
+            child: Stack(
+              children: [
+                Row(
+                  children: _whiteKeys.map((k) => _buildWhiteKey(k)).toList(),
+                ),
+                Positioned(
+                  left: 0, top: 0, right: 0, bottom: 40,
+                  child: ClipRect(
+                    child: Stack(
+                      children: _blackKeys.map((k) {
+                        final left = (k.whiteIndex + 1) * _whiteKeyWidth - _blackKeyWidth / 2;
+                        return Positioned(
+                          left: left,
+                          width: _blackKeyWidth,
+                          top: 0,
+                          bottom: 0,
+                          child: _buildBlackKey(k),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-        ),
-        Positioned(
-          left: 32, top: 0,
-          child: SizedBox(width: 21 * 56.0, height: 93, child: Stack(children: _buildBlackKeys())),
         ),
         Positioned(
           left: 0, top: 0, bottom: 0,
@@ -341,11 +385,12 @@ class _StudioScreenState extends ConsumerState<StudioScreen> with TickerProvider
     );
   }
 
-  Widget _buildWhiteKey(String note, int index) {
+  Widget _buildWhiteKey(_WhiteKeyDef keyDef) {
     return GestureDetector(
-      onTap: () => _playNote(note),
+      onTapDown: (_) => _pianoEngine.play(keyDef.note, _isSustain),
       child: Container(
-        width: 56, margin: const EdgeInsets.only(right: 1),
+        width: _whiteKeyWidth,
+        margin: const EdgeInsets.only(right: 1),
         decoration: const BoxDecoration(
           color: Color(0xFFFCFBF9),
           border: Border(right: BorderSide(color: Color(0xFFE5E0D8), width: 1)),
@@ -353,44 +398,37 @@ class _StudioScreenState extends ConsumerState<StudioScreen> with TickerProvider
         ),
         child: Align(
           alignment: Alignment.bottomCenter,
-          child: Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(note, style: const TextStyle(fontSize: 10, color: Color(0xFF524D42)))),
+          child: Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(keyDef.note, style: const TextStyle(fontSize: 10, color: Color(0xFF524D42)))),
         ),
       ),
     );
   }
 
-  List<Widget> _buildBlackKeys() {
-    final blackKeyPositions = [0, 1, 3, 4, 5, 7, 8, 10, 11, 12, 14, 15, 17, 18, 19];
-    return blackKeyPositions.map((whiteIndex) {
-      final left = (whiteIndex + 1) * 56.0 - 16.0;
-      return Positioned(
-        left: left, top: 0,
-        child: GestureDetector(
-          onTap: () => _playNote('C#${3 + whiteIndex ~/ 7}'),
-          child: Container(width: 32, height: 93, decoration: const BoxDecoration(color: Color(0xFF2A251D), borderRadius: BorderRadius.only(bottomLeft: Radius.circular(10), bottomRight: Radius.circular(10)))),
+  Widget _buildBlackKey(_BlackKeyDef keyDef) {
+    return GestureDetector(
+      onTapDown: (_) => _pianoEngine.play(keyDef.note, _isSustain),
+      child: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFF2A251D),
+          borderRadius: const BorderRadius.only(
+            bottomLeft: Radius.circular(6),
+            bottomRight: Radius.circular(6),
+          ),
+          boxShadow: [
+            BoxShadow(color: Colors.black.withValues(alpha: 0.5), blurRadius: 4, offset: const Offset(2, 2)),
+          ],
         ),
-      );
-    }).toList();
-  }
-
-  void _playNote(String note) {
-    setState(() => _sustainedNote = note);
-    if (!_isSustain) {
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (mounted && _sustainedNote == note && !_isSustain) {
-          setState(() => _sustainedNote = null);
-        }
-      });
-    }
+      ),
+    );
   }
 
   void _scrollOctaveLeft() {
-    final newOffset = _pianoScrollController.offset - 392.0;
+    final newOffset = _pianoScrollController.offset - 7 * _whiteKeyWidth;
     _pianoScrollController.animateTo(newOffset.clamp(0.0, _pianoScrollController.position.maxScrollExtent), duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
   }
 
   void _scrollOctaveRight() {
-    final newOffset = _pianoScrollController.offset + 392.0;
+    final newOffset = _pianoScrollController.offset + 7 * _whiteKeyWidth;
     _pianoScrollController.animateTo(newOffset.clamp(0.0, _pianoScrollController.position.maxScrollExtent), duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
   }
 
@@ -436,29 +474,36 @@ class _StudioScreenState extends ConsumerState<StudioScreen> with TickerProvider
       }
       return;
     }
-    
+
     try {
       final tempDir = await getTemporaryDirectory();
       final path = '${tempDir.path}/${DateTime.now().millisecondsSinceEpoch}.m4a';
-      
+
       await _recorder.start(const RecordConfig(encoder: AudioEncoder.aacLc, bitRate: 128000, sampleRate: 44100), path: path);
-      
+
       setState(() { _isRecording = true; _recordingDuration = Duration.zero; });
-      
+
       _recordingTimer = Timer.periodic(const Duration(seconds: 1), (timer) { setState(() => _recordingDuration += const Duration(seconds: 1)); });
-      
+
       _recorder.onAmplitudeChanged(const Duration(milliseconds: 100)).listen((amp) { final normalized = (amp.current + 60) / 60; setState(() => _amplitude = normalized.clamp(0.0, 1.0)); });
-      
+
       if (!_isMetronomePlaying) _toggleMetronome();
-    } catch (e) { debugPrint('Error starting recording: $e'); }
+    } catch (e) {
+      AppLogger.error('Failed to start recording', error: e);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not start recording. Check microphone access and try again.')),
+        );
+      }
+    }
   }
 
   Future<void> _stopRecording() async {
     _recordingTimer?.cancel();
     if (_isMetronomePlaying) _toggleMetronome();
-    
+
     final recordingPath = await _recorder.stop();
-    
+
     if (recordingPath != null && mounted) {
       setState(() => _isRecording = false);
       await _uploadRecording(recordingPath);
@@ -470,25 +515,25 @@ class _StudioScreenState extends ConsumerState<StudioScreen> with TickerProvider
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a song and section first')));
       return;
     }
-    
+
     final choirId = ref.read(activeChoirIdProvider);
     final userId = ref.read(currentUserIdProvider);
     if (choirId == null || userId == null) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No active choir or user. Please try again.')));
       return;
     }
-    
+
     setState(() { _isUploading = true; _uploadProgress = 0.0; });
-    
+
     try {
       final audioRepo = AudioRepository();
       final downloadUrl = await audioRepo.uploadRecordedAudio(choirId: choirId, songId: _songId!, sectionId: _sectionId!, voicePart: _selectedVoicePart, recordingPath: recordingPath, onProgress: (progress) { setState(() => _uploadProgress = progress); });
-      
+
       final songRepo = SongRepository();
       final audioPart = AudioPart(audioPartId: const Uuid().v4(), sectionId: _sectionId!, songId: _songId!, choirId: choirId, voicePart: _selectedVoicePart, audioUrl: downloadUrl, durationSeconds: _recordingDuration.inSeconds, uploadedBy: userId, createdAt: DateTime.now());
-      
+
       await songRepo.createAudioPart(audioPart);
-      
+
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved. Choristers have been notified.')));
     } catch (e) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error uploading: $e'))); }
     finally { setState(() => _isUploading = false); }
@@ -501,6 +546,18 @@ class _StudioScreenState extends ConsumerState<StudioScreen> with TickerProvider
   }
 }
 
+class _WhiteKeyDef {
+  final String note;
+  final int index;
+  const _WhiteKeyDef(this.note, this.index);
+}
+
+class _BlackKeyDef {
+  final String note;
+  final int whiteIndex;
+  const _BlackKeyDef(this.note, this.whiteIndex);
+}
+
 class _PitchTunerPainter extends CustomPainter {
   final double amplitude;
   _PitchTunerPainter({required this.amplitude});
@@ -509,18 +566,18 @@ class _PitchTunerPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
     final radius = size.width / 2 - 10;
-    
+
     final bgPaint = Paint()..color = Colors.white.withValues(alpha: 0.1)..style = PaintingStyle.stroke..strokeWidth = 8..strokeCap = StrokeCap.round;
     canvas.drawArc(Rect.fromCircle(center: center, radius: radius), math.pi, math.pi, false, bgPaint);
-    
+
     final greenPaint = Paint()..color = Colors.green.withValues(alpha: 0.5)..style = PaintingStyle.stroke..strokeWidth = 8..strokeCap = StrokeCap.round;
     canvas.drawArc(Rect.fromCircle(center: center, radius: radius), math.pi + 0.3, math.pi * 0.4, false, greenPaint);
-    
+
     final needleAngle = math.pi + (amplitude * math.pi * 0.8);
     final needleEnd = Offset(center.dx + (radius - 20) * math.cos(needleAngle), center.dy + (radius - 20) * math.sin(needleAngle));
     final needlePaint = Paint()..color = Colors.white..strokeWidth = 3..strokeCap = StrokeCap.round;
     canvas.drawLine(center, needleEnd, needlePaint);
-    
+
     final dotPaint = Paint()..color = Colors.white..style = PaintingStyle.fill;
     canvas.drawCircle(center, 6, dotPaint);
   }
@@ -535,6 +592,6 @@ class StudioContext {
   final String sectionId;
   final String sectionTitle;
   final VoicePart voicePart;
-  
+
   StudioContext({required this.songId, required this.songTitle, required this.sectionId, required this.sectionTitle, required this.voicePart});
 }

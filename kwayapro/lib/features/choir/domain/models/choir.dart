@@ -26,15 +26,15 @@ class Choir {
 
   factory Choir.fromJson(Map<String, dynamic> json) {
     return Choir(
-      choirId: json['choirId'] as String,
-      name: json['name'] as String,
-      churchName: json['churchName'] as String,
-      leaderId: json['leaderId'] as String,
+      choirId: json['choirId'] as String? ?? '',
+      name: json['name'] as String? ?? '',
+      churchName: json['churchName'] as String? ?? '',
+      leaderId: json['leaderId'] as String? ?? '',
       coverPhotoUrl: json['coverPhotoUrl'] as String?,
-      inviteCode: json['inviteCode'] as String,
-      plan: ChoirPlan.values.byName(json['plan'] as String),
-      songCount: json['songCount'] as int,
-      createdAt: (json['createdAt'] as Timestamp).toDate(),
+      inviteCode: json['inviteCode'] as String? ?? '',
+      plan: ChoirPlan.values.asNameMap()[json['plan']] ?? ChoirPlan.free,
+      songCount: json['songCount'] as int? ?? 0,
+      createdAt: (json['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
     );
   }
 

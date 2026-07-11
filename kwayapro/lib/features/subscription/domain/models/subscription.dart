@@ -22,13 +22,13 @@ class Subscription {
 
   factory Subscription.fromJson(Map<String, dynamic> json) {
     return Subscription(
-      choirId: json['choirId'] as String,
-      plan: ChoirPlan.values.byName(json['plan'] as String),
-      provider: PaymentProvider.values.byName(json['provider'] as String),
-      startDate: (json['startDate'] as Timestamp).toDate(),
-      endDate: (json['endDate'] as Timestamp).toDate(),
-      txRef: json['txRef'] as String,
-      status: SubscriptionStatus.values.byName(json['status'] as String),
+      choirId: json['choirId'] as String? ?? '',
+      plan: ChoirPlan.values.asNameMap()[json['plan']] ?? ChoirPlan.free,
+      provider: PaymentProvider.values.asNameMap()[json['provider']] ?? PaymentProvider.mtn,
+      startDate: (json['startDate'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      endDate: (json['endDate'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      txRef: json['txRef'] as String? ?? '',
+      status: SubscriptionStatus.values.asNameMap()[json['status']] ?? SubscriptionStatus.pending,
     );
   }
 

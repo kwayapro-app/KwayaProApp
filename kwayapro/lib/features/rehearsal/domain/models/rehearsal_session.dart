@@ -31,20 +31,18 @@ class RehearsalSession {
 
   factory RehearsalSession.fromJson(Map<String, dynamic> json) {
     return RehearsalSession(
-      sessionId: json['sessionId'] as String,
-      choirId: json['choirId'] as String,
+      sessionId: json['sessionId'] as String? ?? '',
+      choirId: json['choirId'] as String? ?? '',
       programId: json['programId'] as String?,
       title: json['title'] as String? ?? 'Rehearsal',
-      date: (json['date'] as Timestamp).toDate(),
-      time: json['time'] as String,
-      location: json['location'] as String,
-      directorId: json['directorId'] as String,
+      date: (json['date'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      time: json['time'] as String? ?? '',
+      location: json['location'] as String? ?? '',
+      directorId: json['directorId'] as String? ?? '',
       isGuestDirector: json['isGuestDirector'] as bool? ?? false,
       notes: json['notes'] as String?,
       guestToken: json['guestToken'] as String?,
-      guestTokenExpiry: json['guestTokenExpiry'] != null 
-          ? (json['guestTokenExpiry'] as Timestamp).toDate() 
-          : null,
+      guestTokenExpiry: (json['guestTokenExpiry'] as Timestamp?)?.toDate(),
     );
   }
 

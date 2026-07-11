@@ -7,6 +7,7 @@ class AppUser {
   final String? email;
   final String? profilePhotoUrl;
   final String? fcmToken;
+  final bool onboardingComplete;
   final DateTime createdAt;
 
   const AppUser({
@@ -16,17 +17,19 @@ class AppUser {
     this.email,
     this.profilePhotoUrl,
     this.fcmToken,
+    this.onboardingComplete = false,
     required this.createdAt,
   });
 
   factory AppUser.fromJson(Map<String, dynamic> json) {
     return AppUser(
-      userId: json['userId'] as String,
-      name: json['name'] as String,
-      phone: json['phone'] as String,
+      userId: json['userId'] as String? ?? '',
+      name: json['name'] as String? ?? '',
+      phone: json['phone'] as String? ?? '',
       email: json['email'] as String?,
       profilePhotoUrl: json['profilePhotoUrl'] as String?,
       fcmToken: json['fcmToken'] as String?,
+      onboardingComplete: json['onboardingComplete'] as bool? ?? false,
       createdAt: (json['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
     );
   }
@@ -39,6 +42,7 @@ class AppUser {
       if (email != null) 'email': email,
       if (profilePhotoUrl != null) 'profilePhotoUrl': profilePhotoUrl,
       if (fcmToken != null) 'fcmToken': fcmToken,
+      'onboardingComplete': onboardingComplete,
       'createdAt': Timestamp.fromDate(createdAt),
     };
   }
@@ -50,6 +54,7 @@ class AppUser {
     String? email,
     String? profilePhotoUrl,
     String? fcmToken,
+    bool? onboardingComplete,
     DateTime? createdAt,
   }) {
     return AppUser(
@@ -59,6 +64,7 @@ class AppUser {
       email: email ?? this.email,
       profilePhotoUrl: profilePhotoUrl ?? this.profilePhotoUrl,
       fcmToken: fcmToken ?? this.fcmToken,
+      onboardingComplete: onboardingComplete ?? this.onboardingComplete,
       createdAt: createdAt ?? this.createdAt,
     );
   }

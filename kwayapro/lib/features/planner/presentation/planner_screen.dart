@@ -41,6 +41,7 @@ class _PlannerScreenState extends ConsumerState<PlannerScreen> with SingleTicker
         permissionChecker.canPlanPrograms;
 
     return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
       appBar: AppBar(
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
@@ -252,6 +253,7 @@ class _ProgramEditorScreenState extends ConsumerState<ProgramEditorScreen> {
         permissionChecker.canPlanPrograms;
 
     return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
       appBar: AppBar(
         leading: IconButton(
           icon: const Icon(Icons.close),
@@ -342,9 +344,8 @@ class _ProgramEditorScreenState extends ConsumerState<ProgramEditorScreen> {
                   child: ReorderableListView.builder(
                     padding: const EdgeInsets.all(16),
                     itemCount: _selectedSongIds.length,
-                    onReorder: (oldIndex, newIndex) {
+                    onReorderItem: (oldIndex, newIndex) {
                       setState(() {
-                        if (newIndex > oldIndex) newIndex--;
                         final item = _selectedSongIds.removeAt(oldIndex);
                         _selectedSongIds.insert(newIndex, item);
                       });

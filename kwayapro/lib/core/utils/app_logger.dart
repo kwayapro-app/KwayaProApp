@@ -1,4 +1,5 @@
 import 'dart:developer' as developer;
+import 'package:flutter/foundation.dart' show kDebugMode;
 
 enum LogLevel {
   debug,
@@ -57,15 +58,18 @@ class AppLogger {
     );
 
     // Print to standard stdout for easy terminal inspection in development
-    // ignore: avoid_print
-    print('$logHeader $message');
-    if (error != null) {
+    // only — gated so release builds don't leak log content to device logs.
+    if (kDebugMode) {
       // ignore: avoid_print
-      print('  Error: $error');
-    }
-    if (stackTrace != null) {
-      // ignore: avoid_print
-      print('  StackTrace:\n$stackTrace');
+      print('$logHeader $message');
+      if (error != null) {
+        // ignore: avoid_print
+        print('  Error: $error');
+      }
+      if (stackTrace != null) {
+        // ignore: avoid_print
+        print('  StackTrace:\n$stackTrace');
+      }
     }
   }
 

@@ -55,8 +55,11 @@ void main() {
       await tester.tap(find.text('Get Started'));
       await tester.pumpAndSettle();
 
-      // Phone step
-      expect(find.byKey(const ValueKey('phone')), findsOneWidget);
+      // Phone step — the widget's ValueKey encodes _authMethod (defaults to
+      // 'phone') to give AnimatedSwitcher a distinct key per auth-method
+      // sub-state and avoid a stale-transition bug from an earlier audit
+      // fix; this test previously expected the pre-fix static key.
+      expect(find.byKey(const ValueKey('phone_phone')), findsOneWidget);
 
       // Invalid phone → snackbar
       await tester.enterText(find.byType(TextFormField), '123');

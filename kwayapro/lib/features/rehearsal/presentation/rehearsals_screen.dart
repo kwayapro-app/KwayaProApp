@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 import 'package:uuid/uuid.dart';
 import '../../../shared/models/enums.dart';
 import '../../choir/domain/choir_providers.dart';
+import '../../../shared/utils/permission_checker.dart';
 import '../domain/rehearsal_providers.dart';
 import '../domain/models/rehearsal_session.dart';
 
@@ -24,8 +25,7 @@ class _RehearsalsScreenState extends ConsumerState<RehearsalsScreen> {
     final pastAsync = ref.watch(pastRehearsalsProvider);
     final membership = ref.watch(currentMembershipProvider).valueOrNull;
     
-    final isManagement = membership?.role == MemberRole.leader || 
-                         membership?.role == MemberRole.director;
+    final isManagement = PermissionChecker(membership).isManagement;
 
     return Scaffold(
       body: SafeArea(

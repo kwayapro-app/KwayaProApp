@@ -10,6 +10,9 @@ firebase-debug.*.log*
 # Firebase cache
 .firebase/
 
+# Local secret-setting scripts (contain plaintext credential values — never commit)
+set_secrets.js
+
 # Firebase config
 
 # Uncomment this if you'd like others to create their own Firebase project.

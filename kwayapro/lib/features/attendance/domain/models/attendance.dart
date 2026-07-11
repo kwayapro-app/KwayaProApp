@@ -17,12 +17,12 @@ class Attendance {
 
   factory Attendance.fromJson(Map<String, dynamic> json) {
     return Attendance(
-      sessionId: json['sessionId'] as String,
-      userId: json['userId'] as String,
-      rsvp: RSVPStatus.values.byName(json['rsvp'] as String),
-      attended: json['attended'] as bool,
+      sessionId: json['sessionId'] as String? ?? '',
+      userId: json['userId'] as String? ?? '',
+      rsvp: RSVPStatus.values.asNameMap()[json['rsvp']] ?? RSVPStatus.pending,
+      attended: json['attended'] as bool? ?? false,
       voicePartOverride: json['voicePartOverride'] != null
-          ? VoicePart.values.byName(json['voicePartOverride'] as String)
+          ? VoicePart.values.asNameMap()[json['voicePartOverride']]
           : null,
     );
   }

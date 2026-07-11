@@ -23,14 +23,14 @@ class Song {
 
   factory Song.fromJson(Map<String, dynamic> json) {
     return Song(
-      songId: json['songId'] as String,
-      choirId: json['choirId'] as String,
-      title: json['title'] as String,
+      songId: json['songId'] as String? ?? '',
+      choirId: json['choirId'] as String? ?? '',
+      title: json['title'] as String? ?? '',
       key: json['key'] as String?,
       language: json['language'] as String?,
       category: json['category'] as String?,
-      uploadedBy: json['uploadedBy'] as String,
-      createdAt: (json['createdAt'] as Timestamp).toDate(),
+      uploadedBy: json['uploadedBy'] as String? ?? '',
+      createdAt: (json['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
     );
   }
 

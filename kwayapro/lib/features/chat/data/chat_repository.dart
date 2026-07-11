@@ -5,8 +5,19 @@ import '../../../shared/models/enums.dart';
 import '../domain/models/chat_message.dart';
 
 class ChatRepository {
-  final FirebaseFirestore _db = FirebaseFirestore.instance;
-  final FirebaseStorage _storage = FirebaseStorage.instance;
+  // Phase 4: made injectable (matching the BaseRepository pattern already
+  // used by other repositories) so pin/unpin can be exercised end-to-end
+  // against a fake Firestore in tests instead of only reading like correct
+  // code. _storage is resolved lazily (not in the constructor) so tests
+  // that only touch Firestore (pin/unpin, sending text messages) never
+  // trigger FirebaseStorage.instance, which requires a real Firebase app.
+  ChatRepository({FirebaseFirestore? firestore, FirebaseStorage? storage})
+      : _db = firestore ?? FirebaseFirestore.instance,
+        _storageOverride = storage;
+
+  final FirebaseFirestore _db;
+  final FirebaseStorage? _storageOverride;
+  FirebaseStorage get _storage => _storageOverride ?? FirebaseStorage.instance;
 
   Stream<List<ChatMessage>> watchMessages(String choirId, {int limit = 50}) {
     return _db
@@ -18,14 +29,23 @@ class ChatRepository {
         .map((snap) => snap.docs.map((d) => ChatMessage.fromJson(d.data())).toList());
   }
 
+  // Phase 4 Fix 2: previously generated messageId via a throwaway
+  // .doc().id, then persisted the message via .add() — which assigns a
+  // DIFFERENT auto-generated document ID, so the stored messageId never
+  // matched the real document. pinMessage/unpinMessage's
+  // .doc(message.messageId).update(...) therefore always targeted a
+  // document that never existed. Reserving the doc reference first and
+  // writing to it directly (docRef.set(...)) instead of .add() guarantees
+  // messageId always matches the real document ID.
   Future<void> sendTextMessage({
     required String choirId,
     required String senderId,
     required String content,
     VoicePart? targetVoicePart,
   }) async {
+    final docRef = _db.collection('chat_messages').doc();
     final message = ChatMessage(
-      messageId: _db.collection('chat_messages').doc().id,
+      messageId: docRef.id,
       choirId: choirId,
       senderId: senderId,
       type: MessageType.text,
@@ -34,7 +54,7 @@ class ChatRepository {
       pinned: false,
       timestamp: DateTime.now(),
     );
-    await _db.collection('chat_messages').add(message.toJson());
+    await docRef.set(message.toJson());
   }
 
   Future<void> sendAudioMessage({
@@ -43,8 +63,9 @@ class ChatRepository {
     required String audioUrl,
     VoicePart? targetVoicePart,
   }) async {
+    final docRef = _db.collection('chat_messages').doc();
     final message = ChatMessage(
-      messageId: _db.collection('chat_messages').doc().id,
+      messageId: docRef.id,
       choirId: choirId,
       senderId: senderId,
       type: MessageType.audio,
@@ -53,7 +74,7 @@ class ChatRepository {
       pinned: false,
       timestamp: DateTime.now(),
     );
-    await _db.collection('chat_messages').add(message.toJson());
+    await docRef.set(message.toJson());
   }
 
   Future<void> sendImageMessage({
@@ -62,8 +83,9 @@ class ChatRepository {
     required String imageUrl,
     VoicePart? targetVoicePart,
   }) async {
+    final docRef = _db.collection('chat_messages').doc();
     final message = ChatMessage(
-      messageId: _db.collection('chat_messages').doc().id,
+      messageId: docRef.id,
       choirId: choirId,
       senderId: senderId,
       type: MessageType.image,
@@ -72,7 +94,7 @@ class ChatRepository {
       pinned: false,
       timestamp: DateTime.now(),
     );
-    await _db.collection('chat_messages').add(message.toJson());
+    await docRef.set(message.toJson());
   }
 
   Future<void> pinMessage(String messageId, String choirId) async {

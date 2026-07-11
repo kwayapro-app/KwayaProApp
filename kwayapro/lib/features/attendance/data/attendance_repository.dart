@@ -1,9 +1,14 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import '../../../core/utils/attendance_ids.dart';
 import '../../../shared/models/enums.dart';
 import '../domain/models/attendance.dart';
 
 class AttendanceRepository {
-  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  final FirebaseFirestore _db;
+
+  AttendanceRepository({FirebaseFirestore? firestore})
+      : _db = firestore ?? FirebaseFirestore.instance;
 
   Stream<List<Attendance>> watchSessionAttendance(String sessionId) {
     return _db
@@ -14,7 +19,7 @@ class AttendanceRepository {
   }
 
   Stream<Attendance?> watchMemberAttendance(String sessionId, String userId) {
-    final docId = '${sessionId}_$userId';
+    final docId = AttendanceIds.compositeId(sessionId, userId);
     return _db.collection('attendance').doc(docId).snapshots().map(
           (snap) => snap.exists ? Attendance.fromJson(snap.data()!) : null,
         );
@@ -25,22 +30,44 @@ class AttendanceRepository {
     required String userId,
     required bool attended,
   }) async {
-    final docId = '${sessionId}_$userId';
-    final doc = _db.collection('attendance').doc(docId);
-    
-    final existing = await doc.get();
-    final existingData = existing.exists ? existing.data()! : <String, dynamic>{};
-    
-    await doc.set({
-      ...existingData,
-      'sessionId': sessionId,
-      'userId': userId,
-      'attended': attended,
-      'rsvp': existingData['rsvp'] ?? 'coming',
-    }, SetOptions(merge: true));
+    final docId = AttendanceIds.compositeId(sessionId, userId);
+    final targetDoc = _db.collection('attendance').doc(docId);
+
+    final connectivityResult = await Connectivity().checkConnectivity();
+
+    if (connectivityResult.contains(ConnectivityResult.none)) {
+      await targetDoc.set({
+        'sessionId': sessionId,
+        'userId': userId,
+        'attended': attended,
+        'lastModifiedClientTimestamp': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      return;
+    }
+
+    await _db.runTransaction((transaction) async {
+      final snapshot = await transaction.get(targetDoc);
+
+      if (!snapshot.exists) {
+        transaction.set(targetDoc, {
+          'sessionId': sessionId,
+          'userId': userId,
+          'attended': attended,
+          'rsvp': 'pending',
+        });
+      } else {
+        transaction.update(targetDoc, {
+          'attended': attended,
+          'lastModifiedClientTimestamp': FieldValue.serverTimestamp(),
+        });
+      }
+    });
   }
 
   Future<void> batchMarkRSVPAttended(String sessionId) async {
+    final connectivityResult = await Connectivity().checkConnectivity();
+    if (connectivityResult.contains(ConnectivityResult.none)) return;
+
     final snapshot = await _db
         .collection('attendance')
         .where('sessionId', isEqualTo: sessionId)
@@ -61,9 +88,13 @@ class AttendanceRepository {
     required String userId,
     required VoicePart? voicePart,
   }) async {
-    final docId = '${sessionId}_$userId';
+    final docId = AttendanceIds.compositeId(sessionId, userId);
+
+    final connectivityResult = await Connectivity().checkConnectivity();
+    if (connectivityResult.contains(ConnectivityResult.none)) return;
+
     final doc = _db.collection('attendance').doc(docId);
-    
+
     if (voicePart == null) {
       await doc.update({'voicePartOverride': FieldValue.delete()});
     } else {

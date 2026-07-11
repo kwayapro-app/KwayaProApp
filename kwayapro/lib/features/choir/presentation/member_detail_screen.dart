@@ -179,13 +179,6 @@ class _PermissionsSection extends ConsumerWidget {
               ),
               const Divider(height: 1),
               _PermissionToggle(
-                label: 'Score Librarian',
-                description: 'Upload and manage PDF scores',
-                permissionKey: 'score_librarian',
-                membership: membership,
-              ),
-              const Divider(height: 1),
-              _PermissionToggle(
                 label: 'Attendance Manager',
                 description: 'Mark attendance for rehearsals',
                 permissionKey: 'attendance_manager',
