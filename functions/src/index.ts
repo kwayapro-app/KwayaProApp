@@ -651,13 +651,54 @@ function verifyBearerAuth(req: {headers: {authorization?: string}}): Promise<str
   return admin.auth().verifyIdToken(authHeader.slice("Bearer ".length)).then((d) => d.uid);
 }
 
+// ── Per-UID rate limiting (Firestore-backed fixed window) ─────────────────
+// Raised on review: these two endpoints require *a* signed-in account, not
+// tenant membership — trivial to obtain (a throwaway email/password sign-up
+// costs nothing) — and there's no Firebase App Check configured anywhere in
+// this project (no app_check client package, no enforceAppCheck option) to
+// raise that bar. Invite codes are 32^6 (~1.07B) combinations — not
+// astronomical, and the realistic threat here isn't "guess one specific
+// code" but "script a scan and log every 200 vs 404 to harvest every real
+// choir's code", which only requires hitting *some* valid codes, not the
+// one you're after. This fixed-window counter is a cheap stopgap that costs
+// legitimate use nothing (a handful of calls per minute) while making a
+// scripted scan impractically slow. App Check would be the more complete
+// fix if this surface ever sees real abuse.
+const RATE_LIMIT_WINDOW_MS = 60_000;
+
+async function checkRateLimit(uid: string, key: string, maxPerWindow: number): Promise<boolean> {
+  const ref = db.collection("_rate_limits").doc(`${key}_${uid}`);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const data = snap.data() as { count?: number; windowStart?: number } | undefined;
+    const now = Date.now();
+    if (!data || now - (data.windowStart ?? 0) > RATE_LIMIT_WINDOW_MS) {
+      tx.set(ref, { count: 1, windowStart: now });
+      return true;
+    }
+    if ((data.count ?? 0) >= maxPerWindow) {
+      return false;
+    }
+    tx.update(ref, { count: FieldValue.increment(1) });
+    return true;
+  });
+}
+
 export const lookupChoirByInviteCode = onRequest(
   { cors: true },
   async (req, res) => {
+    let uid: string;
     try {
-      await verifyBearerAuth(req);
+      uid = await verifyBearerAuth(req);
     } catch {
       res.status(401).json({ error: "You must be signed in." });
+      return;
+    }
+
+    // 10/min — generous for real typos while joining, far too slow to
+    // script a meaningful scan of the invite-code keyspace.
+    if (!(await checkRateLimit(uid, "lookupChoirByInviteCode", 10))) {
+      res.status(429).json({ error: "Too many attempts. Please wait a minute and try again." });
       return;
     }
 
@@ -691,10 +732,19 @@ export const lookupChoirByInviteCode = onRequest(
 export const checkInviteCodeAvailable = onRequest(
   { cors: true },
   async (req, res) => {
+    let uid: string;
     try {
-      await verifyBearerAuth(req);
+      uid = await verifyBearerAuth(req);
     } catch {
       res.status(401).json({ error: "You must be signed in." });
+      return;
+    }
+
+    // 20/min — generateUniqueInviteCode() retries up to 5x per choir
+    // created, so this comfortably covers a leader creating several choirs
+    // in a session while still capping scripted abuse.
+    if (!(await checkRateLimit(uid, "checkInviteCodeAvailable", 20))) {
+      res.status(429).json({ error: "Too many attempts. Please wait a minute and try again." });
       return;
     }
 

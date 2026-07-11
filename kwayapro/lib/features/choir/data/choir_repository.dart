@@ -40,6 +40,19 @@ class ChoirRepository extends BaseRepository {
     return token;
   }
 
+  /// Surfaces the Cloud Function's own {error: "..."} message when present
+  /// (e.g. the 429 rate-limit response) instead of a generic fallback.
+  String _serverErrorMessage(http.Response response, String fallback) {
+    try {
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      final message = body['error'] as String?;
+      if (message != null && message.isNotEmpty) return message;
+    } catch (_) {
+      // Response body wasn't JSON — fall through to the generic message.
+    }
+    return fallback;
+  }
+
   CollectionReference<Choir> get _choirsRef =>
       db.collection('choirs').withConverter<Choir>(
             fromFirestore: (snapshot, _) => Choir.fromJson(snapshot.data()!),
@@ -85,7 +98,10 @@ class ChoirRepository extends BaseRepository {
       body: jsonEncode({'code': code}),
     );
     if (response.statusCode != 200) {
-      throw Exception('Could not check invite code availability. Please try again.');
+      throw Exception(_serverErrorMessage(
+        response,
+        'Could not check invite code availability. Please try again.',
+      ));
     }
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     return body['available'] as bool;
@@ -117,7 +133,10 @@ class ChoirRepository extends BaseRepository {
     );
     if (response.statusCode == 404) return null;
     if (response.statusCode != 200) {
-      throw Exception('Could not look up that invite code. Please try again.');
+      throw Exception(_serverErrorMessage(
+        response,
+        'Could not look up that invite code. Please try again.',
+      ));
     }
     final body = jsonDecode(response.body) as Map<String, dynamic>;
     return ChoirInviteLookup(

@@ -346,21 +346,35 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     if (code.isEmpty) return;
 
     setState(() => _isLoading = true);
-    final repo = ref.read(choirRepositoryProvider);
-    final choir = await repo.getChoirByInviteCode(code);
-    setState(() => _isLoading = false);
+    try {
+      final repo = ref.read(choirRepositoryProvider);
+      final choir = await repo.getChoirByInviteCode(code);
+      setState(() => _isLoading = false);
 
-    if (choir != null) {
-      setState(() {
-        _isJoining = true;
-        _isCreating = false;
-        _pendingChoirId = choir.choirId;
-      });
-      _nextStep();
-    } else {
+      if (choir != null) {
+        setState(() {
+          _isJoining = true;
+          _isCreating = false;
+          _pendingChoirId = choir.choirId;
+        });
+        _nextStep();
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Invalid invite code')),
+          );
+        }
+      }
+    } catch (e) {
+      // getChoirByInviteCode now calls a Cloud Function (see
+      // ChoirRepository) rather than a Firestore query — unlike the old
+      // query, which only ever returned null, this can throw (rate limit,
+      // network error, server error), so this needs its own handling
+      // rather than relying on the null-check above.
+      setState(() => _isLoading = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Invalid invite code')),
+          SnackBar(content: Text('$e'.replaceFirst('Exception: ', ''))),
         );
       }
     }
