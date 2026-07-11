@@ -10,10 +10,16 @@ class AttendanceRepository {
   AttendanceRepository({FirebaseFirestore? firestore})
       : _db = firestore ?? FirebaseFirestore.instance;
 
-  Stream<List<Attendance>> watchSessionAttendance(String sessionId) {
+  // CHORISTER AUDIT FIX: same fix as RehearsalRepository.watchRSVPCounts —
+  // firestore.rules' attendance list rule can only prove itself via
+  // resource.data.choirId, so a sessionId-only filter got the whole query
+  // rejected for a plain chorister even though every result would
+  // individually satisfy the rule.
+  Stream<List<Attendance>> watchSessionAttendance(String sessionId, String choirId) {
     return _db
         .collection('attendance')
         .where('sessionId', isEqualTo: sessionId)
+        .where('choirId', isEqualTo: choirId)
         .snapshots()
         .map((snap) => snap.docs.map((d) => Attendance.fromJson(d.data())).toList());
   }
@@ -28,6 +34,7 @@ class AttendanceRepository {
   Future<void> markAttendance({
     required String sessionId,
     required String userId,
+    required String choirId,
     required bool attended,
   }) async {
     final docId = AttendanceIds.compositeId(sessionId, userId);
@@ -39,6 +46,7 @@ class AttendanceRepository {
       await targetDoc.set({
         'sessionId': sessionId,
         'userId': userId,
+        'choirId': choirId,
         'attended': attended,
         'lastModifiedClientTimestamp': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
@@ -52,6 +60,7 @@ class AttendanceRepository {
         transaction.set(targetDoc, {
           'sessionId': sessionId,
           'userId': userId,
+          'choirId': choirId,
           'attended': attended,
           'rsvp': 'pending',
         });
@@ -86,6 +95,7 @@ class AttendanceRepository {
   Future<void> setVoicePartOverride({
     required String sessionId,
     required String userId,
+    required String choirId,
     required VoicePart? voicePart,
   }) async {
     final docId = AttendanceIds.compositeId(sessionId, userId);
@@ -101,15 +111,20 @@ class AttendanceRepository {
       await doc.set({
         'sessionId': sessionId,
         'userId': userId,
+        'choirId': choirId,
         'voicePartOverride': voicePart.name,
       }, SetOptions(merge: true));
     }
   }
 
+  // CHORISTER AUDIT FIX: choirId was accepted but never used — this query
+  // returned a member's attendance across every choir they belong to, not
+  // just the active one, blending "own attendance %" across choirs.
   Stream<List<Attendance>> watchMemberHistory(String userId, String choirId) {
     return _db
         .collection('attendance')
         .where('userId', isEqualTo: userId)
+        .where('choirId', isEqualTo: choirId)
         .orderBy('sessionId', descending: true)
         .snapshots()
         .map((snap) => snap.docs.map((d) => Attendance.fromJson(d.data())).toList());
@@ -119,6 +134,7 @@ class AttendanceRepository {
     final snapshot = await _db
         .collection('attendance')
         .where('userId', isEqualTo: userId)
+        .where('choirId', isEqualTo: choirId)
         .get();
 
     if (snapshot.docs.isEmpty) return 0.0;

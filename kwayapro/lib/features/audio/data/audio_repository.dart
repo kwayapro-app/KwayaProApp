@@ -75,8 +75,18 @@ class AudioRepository extends BaseRepository {
   }
 
   // Listen event logging
+  //
+  // CHORISTER AUDIT FIX: this method previously had zero call sites — no
+  // ListenEvent was ever created regardless of playback (now wired from
+  // AudioPlayerNotifier.play()). It also never wrote `choirId`, even though
+  // firestore.rules' create rule requires it (`isTenantMember(request
+  // .resource.data.choirId)`) — a write missing that field would have been
+  // rejected outright the moment this WAS wired up. Also added here so
+  // watchChoirListenEvents' `where('choirId', ...)` query (below) has a
+  // field to actually filter on.
   Future<void> logListenEvent({
     required String userId,
+    required String choirId,
     required String audioPartId,
     required String songId,
     required String sectionId,
@@ -85,6 +95,7 @@ class AudioRepository extends BaseRepository {
   }) async {
     await db.collection('listen_events').add({
       'userId': userId,
+      'choirId': choirId,
       'audioPartId': audioPartId,
       'songId': songId,
       'sectionId': sectionId,

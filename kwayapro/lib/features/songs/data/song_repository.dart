@@ -197,14 +197,41 @@ class SongRepository extends BaseRepository {
     return part;
   }
 
+  // CHORISTER AUDIT FIX: had no UI call site at all (dead code), so this
+  // wasn't a live bug, but it also never reverted a section's status back
+  // to comingSoon after its last audio_part was removed — confirmAudioUpload
+  // (functions/src/index.ts) is the only place status flips to 'ready', and
+  // nothing flipped it back, so a section with zero remaining audio would
+  // have falsely shown "Ready" once this ever gets wired to a UI.
   Future<void> deleteAudioPart(String audioPartId) async {
+    final partDoc = await db.collection('audio_parts').doc(audioPartId).get();
+    final sectionId = partDoc.data()?['sectionId'] as String?;
+
     await db.collection('audio_parts').doc(audioPartId).delete();
+
+    if (sectionId == null) return;
+    final remaining = await db
+        .collection('audio_parts')
+        .where('sectionId', isEqualTo: sectionId)
+        .limit(1)
+        .get();
+    if (remaining.docs.isEmpty) {
+      await db.collection('song_sections').doc(sectionId).update({
+        'status': SectionStatus.comingSoon.name,
+      });
+    }
   }
 
-  Stream<List<AudioPart>> watchAudioParts(String songId) {
+  // CHORISTER AUDIT FIX: confirmed live that a songId-only filter here got
+  // this query rejected outright for a plain chorister — same class of bug
+  // as attendance's sessionId-only query earlier in this audit:
+  // firestore.rules' audio_parts read rule can only prove itself via
+  // resource.data.choirId, so the query's own filter needs to include it.
+  Stream<List<AudioPart>> watchAudioParts(String songId, String choirId) {
     return db
         .collection('audio_parts')
         .where('songId', isEqualTo: songId)
+        .where('choirId', isEqualTo: choirId)
         .snapshots()
         .map((snapshot) => _parseSkippingBadDocs(snapshot.docs, AudioPart.fromJson, 'audio_parts'));
   }

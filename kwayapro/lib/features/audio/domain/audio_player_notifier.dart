@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
@@ -59,11 +60,34 @@ class AudioPlayerState {
 
 class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
   bool _isDisposed = false;
+  StreamSubscription<Duration>? _positionSub;
+  StreamSubscription<Duration?>? _durationSub;
+  StreamSubscription<PlayerState>? _playerStateSub;
 
   @override
   AudioPlayerState build() {
+    // CHORISTER AUDIT FIX: these three listeners used to be registered on
+    // the AudioPlayer itself (in _audioPlayerProvider below) with empty
+    // bodies — "Position/Duration/Player state updates handled in play
+    // state" was a comment describing intent that was never actually
+    // implemented. Nothing ever wrote position/duration/isPlaying back into
+    // AudioPlayerState, so the mini-player's progress bar was permanently
+    // stuck at 0 and its play/pause icon never left "play" even mid-playback.
+    _positionSub = _player.positionStream.listen((position) {
+      if (!_isDisposed) state = state.copyWith(position: position);
+    });
+    _durationSub = _player.durationStream.listen((duration) {
+      if (!_isDisposed) state = state.copyWith(duration: duration ?? Duration.zero);
+    });
+    _playerStateSub = _player.playerStateStream.listen((playerState) {
+      if (!_isDisposed) state = state.copyWith(isPlaying: playerState.playing);
+    });
+
     ref.onDispose(() {
       _isDisposed = true;
+      _positionSub?.cancel();
+      _durationSub?.cancel();
+      _playerStateSub?.cancel();
     });
     return const AudioPlayerState();
   }
@@ -101,6 +125,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
         await _player.setFilePath(cachedPath);
         await _player.play();
         state = state.copyWith(isLoading: false);
+        unawaited(_logListen(part, song));
         return;
       }
 
@@ -121,6 +146,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       await _player.setUrl(part.audioUrl);
       await _player.play();
       state = state.copyWith(isLoading: false);
+      unawaited(_logListen(part, song));
 
       unawaited(_cacheInBackground(part.audioUrl));
     } catch (e) {
@@ -128,6 +154,30 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
         error: "Couldn't play this track. Check your connection and try again.",
         isLoading: false,
       );
+    }
+  }
+
+  // CHORISTER AUDIT FIX: AudioRepository.logListenEvent had zero call sites —
+  // playing a song never recorded anything. Logs on play-start per the
+  // audit's requirement; durationPlayedSeconds/completed are recorded as
+  // 0/false since accurately tracking how much of a track was actually
+  // heard (vs. skipped after a second) is a separate, deeper feature than
+  // "logs on play" — left as a follow-up rather than guessed at here.
+  Future<void> _logListen(AudioPart part, Song song) async {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+    try {
+      await ref.read(audioRepositoryProvider).logListenEvent(
+            userId: userId,
+            choirId: part.choirId,
+            audioPartId: part.audioPartId,
+            songId: song.songId,
+            sectionId: part.sectionId,
+            durationPlayedSeconds: 0,
+            completed: false,
+          );
+    } catch (_) {
+      // Best-effort — a failed analytics write should never block playback.
     }
   }
 
@@ -182,21 +232,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
 
 final _audioPlayerProvider = Provider<AudioPlayer>((ref) {
   final player = AudioPlayer();
-  
-  player.positionStream.listen((position) {
-    // Position updates handled in play state
-  });
-  
-  player.durationStream.listen((duration) {
-    // Duration updates handled in play state  
-  });
-  
-  player.playerStateStream.listen((playerState) {
-    // Player state updates handled in play state
-  });
-  
   ref.onDispose(() => player.dispose());
-  
   return player;
 });
 

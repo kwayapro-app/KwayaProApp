@@ -329,6 +329,7 @@ class _AttendanceMemberRow extends ConsumerWidget {
       await ref.read(attendanceRepositoryProvider).markAttendance(
             sessionId: sessionId,
             userId: membership.userId,
+            choirId: membership.choirId,
             attended: !(attendance?.attended ?? false),
           );
     } catch (e) {
@@ -423,6 +424,7 @@ class _VoicePartOverrideSheet extends ConsumerWidget {
       await ref.read(attendanceRepositoryProvider).setVoicePartOverride(
             sessionId: sessionId,
             userId: member.userId,
+            choirId: member.choirId,
             voicePart: part,
           );
       if (context.mounted) {

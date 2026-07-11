@@ -44,9 +44,12 @@ final songSectionsProvider = StreamProvider.autoDispose.family<List<SongSection>
   return sub;
 });
 
-// Audio parts for a specific song
-final audioPartsProvider = StreamProvider.autoDispose.family<List<AudioPart>, String>((ref, songId) {
-  final sub = ref.watch(songRepositoryProvider).watchAudioParts(songId);
+// Audio parts for a specific song. Keyed by (songId, choirId) — CHORISTER
+// AUDIT FIX: watchAudioParts now needs choirId to match what
+// firestore.rules can actually authorize for a plain chorister (see that
+// method's comment).
+final audioPartsProvider = StreamProvider.autoDispose.family<List<AudioPart>, (String songId, String choirId)>((ref, args) {
+  final sub = ref.watch(songRepositoryProvider).watchAudioParts(args.$1, args.$2);
   ref.onDispose(() => sub.drain());
   return sub;
 });
@@ -93,7 +96,7 @@ final songsWithPartsProvider = StreamProvider.autoDispose<List<SongWithParts>>((
         final songsWithParts = <SongWithParts>[];
 
         for (final song in songs) {
-          final parts = await ref.read(audioPartsProvider(song.songId).future);
+          final parts = await ref.read(audioPartsProvider((song.songId, song.choirId)).future);
 
           final partsByVoicePart = <VoicePart, List<AudioPart>>{};
           for (final part in parts) {

@@ -160,17 +160,37 @@ class RehearsalRepository extends BaseRepository {
   }
 
   // RSVP
+  //
+  // CHORISTER AUDIT FIX: this used to `set(..., merge:true)` with an
+  // unconditional `'attended': false` on every RSVP call, which silently
+  // reset attendance a leader had already marked for a past session the
+  // moment the member touched their RSVP again. Now never includes
+  // `attended` in the write at all — confirmed live that both a `.get()`
+  // pre-check and an `update()`-first approach threw permission-denied for
+  // a first-time RSVP: firestore.rules' create/update rules dereference
+  // resource.data, which is null for a not-yet-existing document, and
+  // Firestore fails that closed rather than treating it as "allowed,
+  // nothing there yet" — true for get(), and, contrary to the assumption
+  // this comment used to make, also true for update() (it does not
+  // silently short-circuit to a rules-independent not-found the way a
+  // pre-existence check would). A single `set(merge:true)` sidesteps this
+  // entirely: Firestore itself decides create-vs-update server-side based
+  // on whether the document exists, evaluating the matching rule branch
+  // without any client-side probing — and since the payload never mentions
+  // `attended`, both the create rule (attended absent-or-false) and the
+  // update rule (attended unchanged) are satisfied unconditionally.
   Future<void> setRSVP({
     required String sessionId,
     required String userId,
+    required String choirId,
     required RSVPStatus status,
   }) async {
     final docId = AttendanceIds.compositeId(sessionId, userId);
     await db.collection('attendance').doc(docId).set({
       'sessionId': sessionId,
       'userId': userId,
+      'choirId': choirId,
       'rsvp': status.name,
-      'attended': false,
     }, SetOptions(merge: true));
   }
 
@@ -186,10 +206,21 @@ class RehearsalRepository extends BaseRepository {
         });
   }
 
-  Stream<Map<RSVPStatus, int>> watchRSVPCounts(String sessionId) {
+  // CHORISTER AUDIT FIX: confirmed live that a `sessionId`-only filter here
+  // made Firestore reject the query outright with permission-denied for a
+  // plain chorister — firestore.rules' attendance list rule can only prove
+  // itself using resource.data.choirId (an isTenantMember(choirId) check;
+  // sessionId alone doesn't tell the rule which choir without a get()
+  // lookup Firestore won't perform for a list request), so the query's own
+  // filter has to include the field the rule actually checks. A query
+  // filtered only by fields the rule can't verify against gets rejected
+  // wholesale, even though every matching document would individually
+  // satisfy the rule.
+  Stream<Map<RSVPStatus, int>> watchRSVPCounts(String sessionId, String choirId) {
     return db
         .collection('attendance')
         .where('sessionId', isEqualTo: sessionId)
+        .where('choirId', isEqualTo: choirId)
         .snapshots()
         .map((snapshot) {
           final counts = <RSVPStatus, int>{

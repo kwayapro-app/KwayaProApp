@@ -134,6 +134,15 @@ export const onRehearsalCreated = onDocumentCreated("rehearsal_sessions/{session
 });
 
 // ── Rehearsal 24hr Reminder ────────────────────────────────────
+// CHORISTER AUDIT FIX: this used to notify every member of the choir
+// regardless of RSVP status — someone who'd already responded "Coming" or
+// "Not Coming" still got a reminder as if they'd never RSVPed, which is
+// what the reminder is supposed to be *for*. Now excludes anyone with an
+// attendance doc whose rsvp is 'coming' or 'notComing' for this session
+// (RSVPStatus, enums.dart) — 'pending'/no doc at all both still count as
+// "un-RSVPed" and get reminded. Also fixed the notification body, which
+// interpolated the raw Firestore Timestamp object (`${session.date}`)
+// instead of a formatted date.
 export const rehearsalReminder = onSchedule("0 * * * *", async (event) => {
   const now = Timestamp.now();
   const tomorrow = new Date(now.toDate().getTime() + 24 * 60 * 60 * 1000);
@@ -149,16 +158,29 @@ export const rehearsalReminder = onSchedule("0 * * * *", async (event) => {
     const choirId = session.choirId as string;
     const members = await db.collection("choir_memberships").where("choirId", "==", choirId).get();
 
+    const attendanceDocs = await db.collection("attendance").where("sessionId", "==", doc.id).get();
+    const respondedUserIds = new Set(
+      attendanceDocs.docs
+        .filter((a) => a.data().rsvp === "coming" || a.data().rsvp === "notComing")
+        .map((a) => a.data().userId as string),
+    );
+
     const tokens: string[] = [];
     for (const m of members.docs) {
-      const userDoc = await db.collection("users").doc(m.data().userId).get();
+      const userId = m.data().userId as string;
+      if (respondedUserIds.has(userId)) continue;
+      const userDoc = await db.collection("users").doc(userId).get();
       const token = userDoc.data()?.fcmToken as string | undefined;
       if (token) tokens.push(token);
     }
 
     if (tokens.length > 0) {
+      const dateObj = (session.date as Timestamp).toDate();
+      const formattedDate = dateObj.toLocaleDateString("en-US", {
+        weekday: "long", month: "long", day: "numeric",
+      });
       const message = {
-        notification: { title: "Rehearsal Tomorrow!", body: `Don't forget: ${session.date} at ${session.time}` },
+        notification: { title: "Rehearsal Tomorrow!", body: `Don't forget: ${formattedDate} at ${session.time}` },
         data: { type: "rehearsal_reminder", sessionId: doc.id, choirId },
         tokens,
       };

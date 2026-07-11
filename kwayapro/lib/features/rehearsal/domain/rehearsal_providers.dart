@@ -37,7 +37,9 @@ final myRSVPProvider = StreamProvider.autoDispose.family<Attendance?, String>((r
 });
 
 final rsvpCountsProvider = StreamProvider.autoDispose.family<Map<RSVPStatus, int>, String>((ref, sessionId) {
-  final sub = ref.watch(rehearsalRepositoryProvider).watchRSVPCounts(sessionId);
+  final choirId = ref.watch(activeChoirIdProvider);
+  if (choirId == null) return Stream.value(<RSVPStatus, int>{});
+  final sub = ref.watch(rehearsalRepositoryProvider).watchRSVPCounts(sessionId, choirId);
   ref.onDispose(() => sub.drain());
   return sub;
 });

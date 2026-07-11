@@ -51,7 +51,7 @@ class MiniPlayerBar extends ConsumerWidget {
             ),
           ),
         Container(
-          height: 60,
+          height: 68, // was 60 — a couple pixels taller to fit the new Slider (was a 4px static bar)
           decoration: BoxDecoration(
             color: theme.colorScheme.surfaceContainerHigh,
             border: Border(
@@ -63,12 +63,32 @@ class MiniPlayerBar extends ConsumerWidget {
           ),
           child: Column(
             children: [
-              // Seek bar
-              LinearProgressIndicator(
-                value: progress,
-                minHeight: 4,
-                backgroundColor: theme.colorScheme.surfaceContainerHighest,
-                valueColor: AlwaysStoppedAnimation(theme.colorScheme.primary),
+              // Seek bar — CHORISTER AUDIT FIX: this was a non-interactive
+              // LinearProgressIndicator (display-only, no seek control
+              // existed anywhere in the player). A Slider is the standard
+              // Material seek control and reuses the same position/duration
+              // state AudioPlayerNotifier now actually keeps updated.
+              SizedBox(
+                height: 12,
+                child: SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 3,
+                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+                  ),
+                  child: Slider(
+                    value: progress.clamp(0.0, 1.0),
+                    activeColor: theme.colorScheme.primary,
+                    inactiveColor: theme.colorScheme.surfaceContainerHighest,
+                    onChanged: duration.inMilliseconds > 0
+                        ? (value) {
+                            ref.read(audioPlayerProvider.notifier).seek(
+                                  Duration(milliseconds: (value * duration.inMilliseconds).round()),
+                                );
+                          }
+                        : null,
+                  ),
+                ),
               ),
               // Controls
               Expanded(

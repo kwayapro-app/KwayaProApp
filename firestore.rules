@@ -27,6 +27,22 @@ service cloud.firestore {
       return isTenantMember(choirId) && permission in getMembershipData(choirId).permissions;
     }
 
+    // CHORISTER AUDIT FIX: PermissionChecker (permission_checker.dart) grants
+    // canUploadAudio/canPlanPrograms to isManagement OR a member holding the
+    // named granular permission, and planner_screen.dart actually gates its
+    // create-program UI on canPlanPrograms — but the songs/song_sections/
+    // audio_parts/song_programs write rules below previously checked role
+    // only, never the permission. A chorister granted these permissions saw
+    // working UI that always failed server-side. These mirror
+    // PermissionChecker's own OR so a permission grant actually works.
+    function canUploadAudio(choirId) {
+      return hasAnyRole(choirId, ['leader', 'director']) || hasPermission(choirId, 'audio_uploader');
+    }
+
+    function canPlanPrograms(choirId) {
+      return hasAnyRole(choirId, ['leader', 'director']) || hasPermission(choirId, 'song_program_planner');
+    }
+
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
@@ -54,8 +70,29 @@ service cloud.firestore {
     // (firebase.google.com/docs/firestore/security/rules-structure) — it cannot
     // be declared directly inside a `match` block as the old attendance rule did.
     // Replaced with this helper function, used inline below.
-    function attendanceChoirId(attendanceId) {
+    //
+    // CHORISTER AUDIT FIX (confirmed live: both a chorister's own RSVP write
+    // and a leader marking someone's attendance returned PERMISSION_DENIED —
+    // attendance was completely non-functional). Attendance document IDs are
+    // `${sessionId}_${userId}` (see AttendanceIds.compositeId,
+    // attendance_ids.dart) — this function's old `.split('_')[0]` therefore
+    // returned the sessionId, not a choirId, so every hasPermission/hasAnyRole
+    // check below was evaluating against a bogus tenant and always failed.
+    // Attendance docs carry no choirId field of their own, so this derives it
+    // via the parent rehearsal_sessions doc instead of misparsing the ID.
+    function attendanceSessionId(attendanceId) {
       return attendanceId.split('_')[0];
+    }
+
+    function attendanceChoirId(attendanceId) {
+      return get(/databases/$(database)/documents/rehearsal_sessions/$(attendanceSessionId(attendanceId))).data.choirId;
+    }
+
+    // True when {attendanceId} is the caller's own record for that session —
+    // used to allow self-service RSVP without a choirId lookup.
+    function isOwnAttendanceRecord(attendanceId) {
+      return isAuthenticated() &&
+        attendanceId == attendanceSessionId(attendanceId) + '_' + request.auth.uid;
     }
 
     // Users
@@ -165,10 +202,13 @@ service cloud.firestore {
     match /songs/{songId} {
       allow read: if isTenantMember(resource.data.choirId);
       allow create: if isTenantMember(request.resource.data.choirId) &&
-        hasAnyRole(request.resource.data.choirId, ['leader', 'director']) &&
+        canUploadAudio(request.resource.data.choirId) &&
         isUnderSongLimit(request.resource.data.choirId);
       allow update: if isTenantMember(resource.data.choirId) &&
-        hasAnyRole(resource.data.choirId, ['leader', 'director']);
+        canUploadAudio(resource.data.choirId);
+      // Deletion stays role-only (not permission-gated) — matches
+      // PermissionChecker.canDeleteSongs, which is leader/director only with
+      // no audio_uploader escape hatch, unlike upload/edit.
       allow delete: if isTenantMember(resource.data.choirId) &&
         hasAnyRole(resource.data.choirId, ['leader', 'director']);
     }
@@ -177,9 +217,9 @@ service cloud.firestore {
     match /song_sections/{sectionId} {
       allow read: if isTenantMember(resource.data.choirId);
       allow create: if isTenantMember(request.resource.data.choirId) &&
-        hasAnyRole(request.resource.data.choirId, ['leader', 'director']);
+        canUploadAudio(request.resource.data.choirId);
       allow update: if isTenantMember(resource.data.choirId) &&
-        hasAnyRole(resource.data.choirId, ['leader', 'director']);
+        canUploadAudio(resource.data.choirId);
       allow delete: if isTenantMember(resource.data.choirId) &&
         hasAnyRole(resource.data.choirId, ['leader', 'director']);
     }
@@ -188,9 +228,9 @@ service cloud.firestore {
     match /audio_parts/{partId} {
       allow read: if isTenantMember(resource.data.choirId);
       allow create: if isTenantMember(request.resource.data.choirId) &&
-        hasAnyRole(request.resource.data.choirId, ['leader', 'director']);
+        canUploadAudio(request.resource.data.choirId);
       allow update: if isTenantMember(resource.data.choirId) &&
-        hasAnyRole(resource.data.choirId, ['leader', 'director']);
+        canUploadAudio(resource.data.choirId);
       allow delete: if isTenantMember(resource.data.choirId) &&
         hasAnyRole(resource.data.choirId, ['leader', 'director']);
     }
@@ -205,10 +245,56 @@ service cloud.firestore {
 
     // Attendance
     match /attendance/{attendanceId} {
-      allow read: if isAuthenticated() &&
-        (request.auth.uid == resource.data.userId ||
-         hasPermission(attendanceChoirId(attendanceId), 'attendance_manager') ||
-         hasAnyRole(attendanceChoirId(attendanceId), ['leader', 'director']));
+      // CHORISTER AUDIT FIX: confirmed live that this whole collection was
+      // more restrictive than the app actually needs. Two separate problems:
+      // (1) rehearsals_screen.dart's rsvpCountsProvider queries ALL
+      // attendance docs for a session (`where('sessionId', ...)`) with no
+      // role gating — it's shown to every member, not just management — so
+      // read access needs to be tenant-wide, not self-or-manager-only, to
+      // match what the UI already assumes. (2) watchMyRSVP does a
+      // `.doc(id).snapshots()` on a record that may not exist yet (before a
+      // member's first-ever RSVP); confirmed live that referencing
+      // resource.data on a nonexistent document evaluates to `resource ==
+      // null`, and any condition dereferencing resource.data.* on that
+      // fails closed (denied) rather than "allowed, nothing there yet" —
+      // isOwnAttendanceRecord sidesteps this since it only parses the
+      // document ID, never resource.data. isTenantMember(resource.data
+      // .choirId) is safe for the query case specifically because a query
+      // only ever returns documents that already exist — resource is never
+      // null there, only for a targeted single-doc read of an ID that
+      // hasn't been written yet.
+      // Split get/list (rather than a blanket `allow read`): confirmed live
+      // that mixing isOwnAttendanceRecord (ID-string based, unrelated to
+      // any resource.data field) into the same OR as
+      // isTenantMember(resource.data.choirId) made Firestore reject the
+      // rsvpCountsProvider *query* outright (permission-denied even for
+      // docs that plainly satisfy the tenant clause) — apparently Firestore
+      // requires every branch of a list rule to be resource.data-provable,
+      // not just at least one. get (single-doc, always has a concrete
+      // attendanceId to parse) keeps the ID-based self-check for the
+      // not-yet-existing-record case; list (queries — sessionId- or
+      // userId+choirId-filtered, per rehearsal_providers.dart /
+      // attendance_providers.dart) uses only the resource.data clause.
+      allow get: if isAuthenticated() &&
+        (isOwnAttendanceRecord(attendanceId) || isTenantMember(resource.data.choirId));
+      allow list: if isAuthenticated() && isTenantMember(resource.data.choirId);
+
+      // Self-service RSVP (CHORISTER AUDIT FIX): the record's owner may
+      // create/update their own doc, but may only ever set their own userId
+      // and may never set `attended: true` themselves — that's a separate,
+      // manager/leader-only action (marking someone present), not something
+      // RSVPing should grant. `attended` must stay false (or, since
+      // RehearsalRepository.setRSVP never includes it at all — seeing the
+      // same resource-is-null problem as above on the read rule when it
+      // tried a `.get()`-then-branch — simply absent) on create, and
+      // unchanged on update.
+      allow create: if isOwnAttendanceRecord(attendanceId) &&
+        request.resource.data.userId == request.auth.uid &&
+        (!('attended' in request.resource.data) || request.resource.data.attended == false);
+      allow update: if isOwnAttendanceRecord(attendanceId) &&
+        request.resource.data.userId == request.auth.uid &&
+        (!('attended' in request.resource.data) || request.resource.data.attended == resource.data.attended);
+
       allow write: if hasPermission(attendanceChoirId(attendanceId), 'attendance_manager') ||
         hasAnyRole(attendanceChoirId(attendanceId), ['leader', 'director']);
     }
@@ -216,8 +302,27 @@ service cloud.firestore {
     // Chat Messages
     match /chat_messages/{messageId} {
       allow read: if isTenantMember(resource.data.choirId);
-      allow create: if isTenantMember(request.resource.data.choirId);
-      allow update: if isOwner(resource.data.senderId);
+      // CHORISTER AUDIT FIX: confirmed live that a chorister could write a
+      // chat_messages doc with targetVoicePart set by calling the API
+      // directly — the client UI correctly hides the targeting control for
+      // non-management senders (chat_screen.dart's _ChatInputBar), but
+      // nothing server-side backed that restriction. Voice-part targeting is
+      // Director/Leader-only per the PRD, so require the field be
+      // null/absent unless the sender has that role.
+      allow create: if isTenantMember(request.resource.data.choirId) &&
+        (
+          !('targetVoicePart' in request.resource.data) ||
+          request.resource.data.targetVoicePart == null ||
+          hasAnyRole(request.resource.data.choirId, ['leader', 'director'])
+        );
+      // Same targetVoicePart restriction as create — otherwise a chorister
+      // could create a message with no target, then update it to add one.
+      allow update: if isOwner(resource.data.senderId) &&
+        (
+          !('targetVoicePart' in request.resource.data) ||
+          request.resource.data.targetVoicePart == null ||
+          hasAnyRole(resource.data.choirId, ['leader', 'director'])
+        );
       allow delete: if hasAnyRole(resource.data.choirId, ['leader', 'director']);
     }
 
@@ -234,7 +339,13 @@ service cloud.firestore {
 
     // Subscriptions
     match /subscriptions/{choirId} {
-      allow read: if isTenantMember(choirId);
+      // CHORISTER AUDIT FIX: confirmed live that any tenant member (not just
+      // leader/director) could read a choir's subscription/billing doc,
+      // even though the UI only ever surfaces Billing to leaders
+      // (home_screen.dart gates the Billing action chip on
+      // PermissionChecker.isLeader). Restrict to management, matching the
+      // UI's actual intent.
+      allow read: if hasAnyRole(choirId, ['leader', 'director']);
       allow write: if false;
     }
 
@@ -249,8 +360,10 @@ service cloud.firestore {
     // Song Programs
     match /song_programs/{programId} {
       allow read: if isTenantMember(resource.data.choirId);
-      allow create: if hasAnyRole(request.resource.data.choirId, ['leader', 'director']);
-      allow update: if hasAnyRole(resource.data.choirId, ['leader', 'director']);
+      allow create: if isTenantMember(request.resource.data.choirId) &&
+        canPlanPrograms(request.resource.data.choirId);
+      allow update: if isTenantMember(resource.data.choirId) &&
+        canPlanPrograms(resource.data.choirId);
       allow delete: if hasRole(resource.data.choirId, 'leader');
     }
 

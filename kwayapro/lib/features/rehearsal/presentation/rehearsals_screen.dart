@@ -352,6 +352,7 @@ class _RehearsalCard extends ConsumerWidget {
               await ref.read(rehearsalRepositoryProvider).setRSVP(
                 sessionId: session.sessionId,
                 userId: ref.read(currentMembershipProvider).valueOrNull?.userId ?? 'unknown',
+                choirId: session.choirId,
                 status: status,
               );
               if (context.mounted) {

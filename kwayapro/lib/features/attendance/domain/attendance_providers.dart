@@ -11,7 +11,9 @@ final attendanceRepositoryProvider = Provider<AttendanceRepository>((ref) {
 // Phase 5 Fix 4: previously not autoDispose — see song_providers.dart /
 // chat_providers.dart for the same fix and reasoning.
 final sessionAttendanceProvider = StreamProvider.autoDispose.family<List<Attendance>, String>((ref, sessionId) {
-  final sub = ref.watch(attendanceRepositoryProvider).watchSessionAttendance(sessionId);
+  final choirId = ref.watch(activeChoirIdProvider);
+  if (choirId == null) return Stream.value([]);
+  final sub = ref.watch(attendanceRepositoryProvider).watchSessionAttendance(sessionId, choirId);
   ref.onDispose(() => sub.drain());
   return sub;
 });

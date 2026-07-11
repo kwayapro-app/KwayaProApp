@@ -201,7 +201,13 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                       userVoicePart: userVoicePart,
                       colorIndex: index,
                       onPartTap: (part) => _playPart(songWithParts, part),
-                      onMoreTap: () => _showSongOptions(songWithParts, isManagement),
+                      onMoreTap: (isManagement || PermissionChecker(membership).canUploadAudio)
+                          ? () => _showSongOptions(
+                                songWithParts,
+                                isManagement,
+                                PermissionChecker(membership).canUploadAudio,
+                              )
+                          : null,
                     );
                   },
                 );
@@ -340,29 +346,37 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     );
   }
 
-  void _showSongOptions(SongWithParts songWithParts, bool isManagement) {
+  // CHORISTER AUDIT FIX: "Edit Song" and "Upload Audio" were reachable by
+  // every member regardless of role — only "Delete Song" was gated. The
+  // underlying Firestore rules always rejected the write for anyone without
+  // canUploadAudio (management role or the audio_uploader permission), so
+  // this wasn't an actual data breach, just a dead-end UI exposing a control
+  // that would silently fail for choristers. Gated to match the rule.
+  void _showSongOptions(SongWithParts songWithParts, bool isManagement, bool canUploadAudio) {
     showModalBottomSheet(
       context: context,
       builder: (context) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
-              leading: const Icon(Icons.edit),
-              title: const Text('Edit Song'),
-              onTap: () {
-                Navigator.pop(context);
-                // Navigate to edit song
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.upload_file),
-              title: const Text('Upload Audio'),
-              onTap: () {
-                Navigator.pop(context);
-                _showUploadAudioSheet(songWithParts);
-              },
-            ),
+            if (canUploadAudio) ...[
+              ListTile(
+                leading: const Icon(Icons.edit),
+                title: const Text('Edit Song'),
+                onTap: () {
+                  Navigator.pop(context);
+                  // Navigate to edit song
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.upload_file),
+                title: const Text('Upload Audio'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showUploadAudioSheet(songWithParts);
+                },
+              ),
+            ],
             if (isManagement)
               ListTile(
                 leading: Icon(Icons.delete, color: Theme.of(context).colorScheme.error),
