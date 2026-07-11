@@ -1,7 +1,260 @@
 rules_version = '2';
-
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isTenantMember(choirId) {
+      return isAuthenticated() &&
+        exists(/databases/$(database)/documents/choir_memberships/$(choirId + '_' + request.auth.uid));
+    }
+
+    function getMembershipData(choirId) {
+      return get(/databases/$(database)/documents/choir_memberships/$(choirId + '_' + request.auth.uid)).data;
+    }
+
+    function hasRole(choirId, role) {
+      return isTenantMember(choirId) && getMembershipData(choirId).role == role;
+    }
+
+    function hasAnyRole(choirId, roles) {
+      return isTenantMember(choirId) && getMembershipData(choirId).role in roles;
+    }
+
+    function hasPermission(choirId, permission) {
+      return isTenantMember(choirId) && permission in getMembershipData(choirId).permissions;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // PHASE 3 FIX 5 (narrowly-scoped rules change, called out explicitly per
+    // PHASE_3_REPORT.md — same review discipline as Phase 2): the freemium
+    // 3-song cap was previously enforced only client-side
+    // (SongRepository.isAtSongLimit), so any direct Firestore write bypassed
+    // it entirely. This mirrors that check server-side in the songs create
+    // rule below. NOTE: this does not fix the check-then-act race between
+    // this read and SongRepository.incrementSongCount's separate,
+    // non-transactional write (see PRODUCTION_READINESS_AUDIT.md §1) — that
+    // needs a transactional create flow, out of scope for a rules-only fix.
+    function choirData(choirId) {
+      return get(/databases/$(database)/documents/choirs/$(choirId)).data;
+    }
+
+    function isUnderSongLimit(choirId) {
+      return choirData(choirId).plan == 'pro' || choirData(choirId).songCount < 3;
+    }
+
+    // PRE-EXISTING BUG FIX (discovered during Phase 2 emulator testing, unrelated
+    // to Fix 1/2/3 but required for the rules file to compile at all): `let` is
+    // only valid inside a function body per Firestore Rules docs
+    // (firebase.google.com/docs/firestore/security/rules-structure) — it cannot
+    // be declared directly inside a `match` block as the old attendance rule did.
+    // Replaced with this helper function, used inline below.
+    function attendanceChoirId(attendanceId) {
+      return attendanceId.split('_')[0];
+    }
+
+    // Users
+    match /users/{userId} {
+      // SECURITY-SENSITIVE CHANGE — see PHASE_2_REPORT.md "Fix 2" for the
+      // functional trade-off this introduces (choir member-list/attendance/
+      // member-detail screens lose live name/photo lookups for OTHER users;
+      // a proper fix requires denormalizing name/photo onto choir_memberships
+      // and is out of scope for this rules-only phase).
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId);
+      allow update, delete: if isOwner(userId);
+    }
+
+    // Choirs
+    match /choirs/{choirId} {
+      // NOTE: invite-code lookup and uniqueness-checking (previously
+      // client-side `where('inviteCode', ...)` queries, which do not fit
+      // this rule — see choir_memberships comment above for why a
+      // field-filtered query can't be authorized by a rule keyed on
+      // isTenantMember) now go through the lookupChoirByInviteCode /
+      // checkInviteCodeAvailable Cloud Functions (functions/src/index.ts),
+      // which use the Admin SDK to bypass rules and return only the
+      // minimal fields the join UI needs. An earlier version of this rule
+      // used `allow read: if isAuthenticated()` to unblock those queries
+      // directly — that was rejected on review: it lets any signed-in user
+      // list the entire choirs collection, dumping every choir's invite
+      // code, not just the one being looked up. Keep this tenant-scoped.
+      allow read: if isTenantMember(choirId);
+      // Tightened alongside the choir_memberships create fix below: a choir's
+      // self-declared leaderId must actually be the requester, since the
+      // choir_memberships create rule trusts choirs/{choirId}.leaderId via
+      // getAfter() to authorize a self-assigned 'leader' membership.
+      allow create: if isAuthenticated() &&
+        request.resource.data.leaderId == request.auth.uid;
+      allow update: if hasAnyRole(choirId, ['leader', 'director']);
+      allow delete: if hasRole(choirId, 'leader');
+    }
+
+    // Choir Memberships
+    match /choir_memberships/{membershipId} {
+      // NOTE: must reference resource.data fields (not the membershipId doc-ID
+      // shape) because ChoirRepository.watchUserMemberships/watchMembers run
+      // collection queries filtered by the `userId`/`choirId` fields
+      // (choir_providers.dart) rather than doc-ID gets. Firestore can only
+      // authorize a query when its rule is expressible purely in terms of
+      // resource.data + request.auth — a rule keyed off the doc ID string
+      // (membershipId.split('_')) is unprovable for a field-filtered query
+      // and Firestore rejects the whole query with permission-denied, even
+      // though every individual doc it would return actually satisfies the
+      // intended access policy. This was the root cause of onboarding never
+      // reaching /home: the router redirect reads userChoirsProvider, whose
+      // underlying query hit this exact case.
+      allow read: if isAuthenticated() &&
+        (resource.data.userId == request.auth.uid ||
+         isTenantMember(resource.data.choirId));
+
+      // FIX (Phase 2, item 4): self-serve creation may only ever grant the
+      // caller 'chorister' for themselves. 'leader' may only be self-granted
+      // when it corresponds to a choir the same request is creating (or that
+      // already exists) with leaderId == the requester, verified via
+      // getAfter() against the choirs/{choirId} document in the same
+      // transaction/batch. 'director' can NEVER be self-granted via create —
+      // promotion to director must go through an existing leader/director's
+      // update (see the update rule below). This closes the self-elevation
+      // hole where any user could create their own membership with
+      // role: 'director'.
+      //
+      // KNOWN REGRESSION: this also blocks the current guest-director
+      // "join via link" flow (ChoirRepository.addGuestDirector, called from
+      // app_router.dart's _RehearsalInviteScreen), which self-creates a
+      // membership with role: 'director' for the invited guest. There is no
+      // rules-only way to distinguish that legitimate case from the
+      // vulnerability, because ChoirMembership documents carry no reference
+      // back to the originating rehearsal session/guest token. See
+      // PHASE_2_REPORT.md for the recommended fix (move guest-director
+      // grants server-side into a Cloud Function using the Admin SDK, which
+      // bypasses these rules entirely and can validate guestTokenExpiry at
+      // the moment of grant).
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid &&
+        (
+          request.resource.data.role == 'chorister' ||
+          (request.resource.data.role == 'leader' &&
+            getAfter(/databases/$(database)/documents/choirs/$(request.resource.data.choirId)).data.leaderId == request.auth.uid)
+        );
+
+      // FIX (Phase 2, item 4 continued): self-updates by the membership
+      // owner may not change their own role or permissions — otherwise the
+      // create-time restriction above is trivially bypassed by updating
+      // instead of creating. Leaders/directors retain full update rights
+      // over any membership in their choir (the existing promotion flow —
+      // e.g. member_detail_screen.dart's role/permission management UI —
+      // is unaffected, since it always writes as a leader/director acting on
+      // someone else's membership document, matching the second branch).
+      allow update: if isAuthenticated() &&
+        (
+          (request.auth.uid == resource.data.userId &&
+           request.resource.data.role == resource.data.role &&
+           request.resource.data.permissions == resource.data.permissions) ||
+          hasAnyRole(resource.data.choirId, ['leader', 'director'])
+        );
+      allow delete: if hasRole(resource.data.choirId, 'leader');
+    }
+
+    // Songs
+    match /songs/{songId} {
+      allow read: if isTenantMember(resource.data.choirId);
+      allow create: if isTenantMember(request.resource.data.choirId) &&
+        hasAnyRole(request.resource.data.choirId, ['leader', 'director']) &&
+        isUnderSongLimit(request.resource.data.choirId);
+      allow update: if isTenantMember(resource.data.choirId) &&
+        hasAnyRole(resource.data.choirId, ['leader', 'director']);
+      allow delete: if isTenantMember(resource.data.choirId) &&
+        hasAnyRole(resource.data.choirId, ['leader', 'director']);
+    }
+
+    // Song Sections
+    match /song_sections/{sectionId} {
+      allow read: if isTenantMember(resource.data.choirId);
+      allow create: if isTenantMember(request.resource.data.choirId) &&
+        hasAnyRole(request.resource.data.choirId, ['leader', 'director']);
+      allow update: if isTenantMember(resource.data.choirId) &&
+        hasAnyRole(resource.data.choirId, ['leader', 'director']);
+      allow delete: if isTenantMember(resource.data.choirId) &&
+        hasAnyRole(resource.data.choirId, ['leader', 'director']);
+    }
+
+    // Audio Parts
+    match /audio_parts/{partId} {
+      allow read: if isTenantMember(resource.data.choirId);
+      allow create: if isTenantMember(request.resource.data.choirId) &&
+        hasAnyRole(request.resource.data.choirId, ['leader', 'director']);
+      allow update: if isTenantMember(resource.data.choirId) &&
+        hasAnyRole(resource.data.choirId, ['leader', 'director']);
+      allow delete: if isTenantMember(resource.data.choirId) &&
+        hasAnyRole(resource.data.choirId, ['leader', 'director']);
+    }
+
+    // Rehearsal Sessions
+    match /rehearsal_sessions/{sessionId} {
+      allow read: if isTenantMember(resource.data.choirId);
+      allow create: if hasAnyRole(request.resource.data.choirId, ['leader', 'director']);
+      allow update: if hasAnyRole(resource.data.choirId, ['leader', 'director']);
+      allow delete: if hasRole(resource.data.choirId, 'leader');
+    }
+
+    // Attendance
+    match /attendance/{attendanceId} {
+      allow read: if isAuthenticated() &&
+        (request.auth.uid == resource.data.userId ||
+         hasPermission(attendanceChoirId(attendanceId), 'attendance_manager') ||
+         hasAnyRole(attendanceChoirId(attendanceId), ['leader', 'director']));
+      allow write: if hasPermission(attendanceChoirId(attendanceId), 'attendance_manager') ||
+        hasAnyRole(attendanceChoirId(attendanceId), ['leader', 'director']);
+    }
+
+    // Chat Messages
+    match /chat_messages/{messageId} {
+      allow read: if isTenantMember(resource.data.choirId);
+      allow create: if isTenantMember(request.resource.data.choirId);
+      allow update: if isOwner(resource.data.senderId);
+      allow delete: if hasAnyRole(resource.data.choirId, ['leader', 'director']);
+    }
+
+    // Listen Events
+    match /listen_events/{eventId} {
+      allow read: if isAuthenticated() &&
+        (request.auth.uid == resource.data.userId ||
+         hasAnyRole(resource.data.choirId, ['leader', 'director']));
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid &&
+        isTenantMember(request.resource.data.choirId);
+      allow update, delete: if false;
+    }
+
+    // Subscriptions
+    match /subscriptions/{choirId} {
+      allow read: if isTenantMember(choirId);
+      allow write: if false;
+    }
+
+    // Payment Requests
+    match /payment_requests/{requestId} {
+      allow read: if isTenantMember(resource.data.choirId);
+      allow create: if isAuthenticated();
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    // Song Programs
+    match /song_programs/{programId} {
+      allow read: if isTenantMember(resource.data.choirId);
+      allow create: if hasAnyRole(request.resource.data.choirId, ['leader', 'director']);
+      allow update: if hasAnyRole(resource.data.choirId, ['leader', 'director']);
+      allow delete: if hasRole(resource.data.choirId, 'leader');
+    }
+
+    // Deny all other access
     match /{document=**} {
       allow read, write: if false;
     }

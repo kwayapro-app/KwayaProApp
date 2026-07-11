@@ -1,15 +1,21 @@
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import '../../../shared/repositories/base_repository.dart';
 import '../../../core/utils/phone_normaliser.dart';
 
-/// Wraps Firebase phone-number and email/password authentication
+
+/// Wraps Firebase phone-number, email/password, and Google authentication
 class AuthRepository extends BaseRepository {
   final FirebaseAuth _auth;
+  final GoogleSignIn _googleSignIn;
 
   AuthRepository({
     super.firestore,
     FirebaseAuth? auth,
-  }) : _auth = auth ?? FirebaseAuth.instance;
+    GoogleSignIn? googleSignIn,
+  })  : _auth = auth ?? FirebaseAuth.instance,
+        _googleSignIn = googleSignIn ?? GoogleSignIn();
 
   // ---------------------------------------------------------------------------
   // Auth state
@@ -46,6 +52,23 @@ class AuthRepository extends BaseRepository {
   /// Sends a password reset email to the specified email address
   Future<void> sendPasswordResetEmail(String email) async {
     await _auth.sendPasswordResetEmail(email: email);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Google Sign-In
+  // ---------------------------------------------------------------------------
+
+  /// Signs in with Google. Returns null if the user cancels the account picker.
+  Future<UserCredential?> signInWithGoogle() async {
+    final googleUser = await _googleSignIn.signIn();
+    if (googleUser == null) return null;
+
+    final googleAuth = await googleUser.authentication;
+    final credential = GoogleAuthProvider.credential(
+      accessToken: googleAuth.accessToken,
+      idToken: googleAuth.idToken,
+    );
+    return _auth.signInWithCredential(credential);
   }
 
   // ---------------------------------------------------------------------------
@@ -122,12 +145,18 @@ class AuthRepository extends BaseRepository {
   // ---------------------------------------------------------------------------
 
   Future<void> updateFCMToken(String userId, String token) async {
-    await db.collection('users').doc(userId).update({'fcmToken': token});
+    await db.collection('users').doc(userId).set(
+      {'fcmToken': token},
+      SetOptions(merge: true),
+    );
   }
 
   // ---------------------------------------------------------------------------
   // Sign out
   // ---------------------------------------------------------------------------
 
-  Future<void> signOut() async => _auth.signOut();
+  Future<void> signOut() async {
+    await _googleSignIn.signOut();
+    await _auth.signOut();
+  }
 }

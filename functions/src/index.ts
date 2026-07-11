@@ -2,8 +2,9 @@ import {setGlobalOptions} from "firebase-functions";
 import {onRequest} from "firebase-functions/v2/https";
 import {onDocumentCreated, onDocumentUpdated} from "firebase-functions/v2/firestore";
 import {onSchedule} from "firebase-functions/v2/scheduler";
-import {defineSecret} from "firebase-functions/params";
+import {defineSecret, projectID} from "firebase-functions/params";
 import * as admin from "firebase-admin";
+import {FieldValue, Timestamp} from "firebase-admin/firestore";
 import * as logger from "firebase-functions/logger";
 
 setGlobalOptions({ maxInstances: 10 });
@@ -17,15 +18,18 @@ const mtnApiKey      = defineSecret("MTN_API_KEY");
 const mtnSubKey      = defineSecret("MTN_SUBSCRIPTION_KEY");
 const mtnWebhookSec  = defineSecret("MTN_WEBHOOK_SECRET");
 const mtnTargetEnv   = defineSecret("MTN_TARGET_ENV");
-const airtelClientId = defineSecret("AIRTEL_CLIENT_ID");
-const airtelClientSec = defineSecret("AIRTEL_CLIENT_SECRET");
-const airtelWebhookSec = defineSecret("AIRTEL_WEBHOOK_SECRET");
+// const airtelClientId = defineSecret("AIRTEL_CLIENT_ID");
+// const airtelClientSec = defineSecret("AIRTEL_CLIENT_SECRET");
+// const airtelWebhookSec = defineSecret("AIRTEL_WEBHOOK_SECRET");
 const r2AccountId    = defineSecret("R2_ACCOUNT_ID");
 const r2AccessKey    = defineSecret("R2_ACCESS_KEY_ID");
 const r2SecretKey    = defineSecret("R2_SECRET_ACCESS_KEY");
 const r2BucketName   = defineSecret("R2_BUCKET_NAME");
 
 // ── R2 Presigned URL Generation ─────────────────────────────────
+export { getR2PresignedUploadChannel } from "./audio/presignedUrlEndpoint";
+
+// Legacy presigned URL function (kept for backward compatibility)
 export const getPresignedUrl = onRequest(
   { cors: true, secrets: [r2AccountId, r2BucketName, r2AccessKey, r2SecretKey] },
   async (req, res) => {
@@ -131,13 +135,13 @@ export const onRehearsalCreated = onDocumentCreated("rehearsal_sessions/{session
 
 // ── Rehearsal 24hr Reminder ────────────────────────────────────
 export const rehearsalReminder = onSchedule("0 * * * *", async (event) => {
-  const now = admin.firestore.Timestamp.now();
+  const now = Timestamp.now();
   const tomorrow = new Date(now.toDate().getTime() + 24 * 60 * 60 * 1000);
   const endWindow = new Date(tomorrow.getTime() + 60 * 60 * 1000);
 
   const sessions = await db.collection("rehearsal_sessions")
-    .where("date", ">=", admin.firestore.Timestamp.fromDate(tomorrow))
-    .where("date", "<=", admin.firestore.Timestamp.fromDate(endWindow))
+    .where("date", ">=", Timestamp.fromDate(tomorrow))
+    .where("date", "<=", Timestamp.fromDate(endWindow))
     .get();
 
   for (const doc of sessions.docs) {
@@ -166,7 +170,7 @@ export const rehearsalReminder = onSchedule("0 * * * *", async (event) => {
 
 // ── Guest Token Expiry ──────────────────────────────────────────
 export const checkGuestTokenExpiry = onSchedule("*/30 * * * *", async () => {
-  const now = admin.firestore.Timestamp.now();
+  const now = Timestamp.now();
   const sessions = await db.collection("rehearsal_sessions")
     .where("guestTokenExpiry", "<=", now)
     .where("isGuestDirector", "==", true)
@@ -174,8 +178,8 @@ export const checkGuestTokenExpiry = onSchedule("*/30 * * * *", async () => {
 
   for (const doc of sessions.docs) {
     await doc.ref.update({
-      guestToken: admin.firestore.FieldValue.delete(),
-      guestTokenExpiry: admin.firestore.FieldValue.delete(),
+      guestToken: FieldValue.delete(),
+      guestTokenExpiry: FieldValue.delete(),
       isGuestDirector: false,
     });
     logger.info(`Expired guest token for session ${doc.id}`);
@@ -209,180 +213,227 @@ export const onProgramPublished = onDocumentUpdated("song_programs/{programId}",
   }
 });
 
-// ── Payment Webhook ─────────────────────────────────────────────
-export const paymentWebhook = onRequest(
-  { cors: true, secrets: [mtnWebhookSec, airtelWebhookSec] },
+// ── Webhook auth helper ──────────────────────────────────────────
+// TODO(payment-integrity, Phase 3): MTN's actual callback authentication
+// mechanism could not be confirmed against an authoritative source —
+// momodeveloper.mtn.com and momoapi.mtn.com are both gated/JS-rendered
+// portals inaccessible from this environment (see PHASE_3_REPORT.md for the
+// exact attempts made). Interim approach: a shared secret embedded as a
+// `?key=` query param in the callbackUrl WE construct and hand to MTN in
+// initiatePayment. This does not depend on MTN sending any particular
+// header we can't verify — MTN must round-trip the exact URL we gave it,
+// query string included, to deliver the callback at all. CONFIRM this
+// against MTN's real Collections API callback spec before trusting it for
+// real production payments; consider also cross-checking transaction status
+// via MTN's authenticated GET /requesttopay/{referenceId} endpoint as a
+// stronger defense once portal access is available.
+function isAuthorizedWebhookRequest(req: { query: Record<string, unknown> }, secretValue: string): boolean {
+  if (!secretValue) return false; // fail CLOSED if the secret isn't configured
+  const provided = req.query.key;
+  return typeof provided === "string" && provided.length > 0 && provided === secretValue;
+}
+
+// (Phase 3b: paymentWebhook was removed here. It was dead/orphaned — nothing
+// in this codebase ever targeted it, only mtnWebhook was ever wired as the
+// real MTN callback destination — see PHASE_3B_REPORT.md Fix A. Deploying
+// this removal requires `firebase deploy --only functions`; until that
+// deploy runs, the previously-deployed version may still be live and
+// reachable.)
+
+// ── Initiate Payment ──────────────────────────────────────────────
+export const initiatePayment = onRequest(
+  { cors: true, secrets: [mtnApiUser, mtnApiKey, mtnSubKey, mtnTargetEnv, mtnWebhookSec] },
   async (req, res) => {
-    const { txRef, status, provider, choirId } = req.body;
-
-    if (!txRef || !status) {
-      res.status(400).json({error: "Missing txRef or status"}); return;
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      res.status(401).json({error: "You must be signed in to do this."});
+      return;
     }
 
-    // Validate webhook signature if present
-    const signature = req.headers["x-webhook-signature"] as string | undefined;
-    if (signature) {
-      const mtnSecret = mtnWebhookSec.value();
-      const airtelSecret = airtelWebhookSec.value();
-      const expected = provider === "airtel" ? airtelSecret : mtnSecret;
-      if (expected && signature !== expected) {
-        res.status(403).json({error: "Invalid signature"}); return;
-      }
+    let uid: string;
+    try {
+      const idToken = authHeader.slice("Bearer ".length);
+      const decoded = await admin.auth().verifyIdToken(idToken);
+      uid = decoded.uid;
+    } catch (e) {
+      logger.warn("initiatePayment: invalid ID token", e);
+      res.status(401).json({error: "Your session has expired. Please sign in again."});
+      return;
     }
 
-    if (status === "completed") {
-      const now = new Date();
-      const endDate = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const { provider, phone, amount, choirId } = req.body;
+    if (!provider || !phone || !amount || !choirId) {
+      res.status(400).json({error: "Missing required fields"});
+      return;
+    }
 
-      await db.collection("subscriptions").doc(choirId || "unknown").set({
-        plan: "pro",
-        provider: provider || "mtn",
-        startDate: admin.firestore.Timestamp.fromDate(now),
-        endDate: admin.firestore.Timestamp.fromDate(endDate),
-        txRef,
-        status: "active",
-      }, { merge: true });
+    if (provider !== "mtn") {
+      res.status(400).json({error: "Airtel Money is coming soon — MTN Mobile Money is available now."});
+      return;
+    }
 
-      if (choirId) {
-        await db.collection("choirs").doc(choirId).update({ plan: "pro" });
+    // Confirm the caller actually belongs to the choir they're paying for —
+    // without this, any authenticated user could trigger a real MTN
+    // requesttopay (an STK-push-style prompt) against an arbitrary phone
+    // number for an arbitrary choirId, at our merchant account's expense.
+    const membershipSnap = await db.collection("choir_memberships").doc(`${choirId}_${uid}`).get();
+    if (!membershipSnap.exists) {
+      res.status(403).json({error: "You are not a member of this choir."});
+      return;
+    }
+
+    const txRef = `TXN-${choirId}-${Date.now()}`;
+    const targetEnv = mtnTargetEnv.value() || "sandbox";
+
+    // MTN's production API host could not be confirmed against an
+    // authoritative source in this environment (see the TODO above
+    // isAuthorizedWebhookRequest for why). "https://momoapi.mtn.com" is
+    // MTN's documented production Collections host per third-party
+    // integration references — CONFIRM against MTN's real docs before
+    // relying on this for real production payments.
+    const baseHost = targetEnv === "production"
+      ? "https://momoapi.mtn.com"
+      : "https://sandbox.momodeveloper.mtn.com";
+
+    try {
+      const tokenResponse = await fetch(
+        `${baseHost}/collection/token/`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${mtnApiUser.value()}:${mtnApiKey.value()}`).toString("base64")}`,
+            "Ocp-Apim-Subscription-Key": mtnSubKey.value(),
+          },
+        },
+      );
+      const tokenData = await tokenResponse.json() as { access_token?: string };
+      const accessToken = tokenData.access_token;
+      if (!accessToken) {
+        res.status(502).json({error: "Failed to get MTN token"});
+        return;
       }
 
-      logger.info(`Payment completed: ${txRef}`);
-      res.json({ success: true });
-    } else {
-      logger.warn(`Payment failed: ${txRef}`);
-      res.json({ success: false, reason: "payment_failed" });
+      const webhookSecret = mtnWebhookSec.value();
+      // Phase 3c: verified this legacy cloudfunctions.net format actually
+      // routes to the live 2nd-gen (Cloud Run-backed) mtnWebhook function,
+      // not just the Cloud Run-native https://mtnwebhook-<hash>-uc.a.run.app
+      // URL Firebase also assigns it. Confirmed empirically (Firebase docs
+      // don't state this explicitly for 2nd gen) — both formats returned an
+      // identical 403 body from mtnWebhook's own isAuthorizedWebhookRequest
+      // rejection, proving both reach the same deployed function. See
+      // PHASE_3C_REPORT.md. Kept this format (rather than switching to the
+      // *.run.app URL) because it doesn't embed a deploy-specific hash
+      // (the "oh5mmorzca" in mtnwebhook-oh5mmorzca-uc.a.run.app) that isn't
+      // derivable from projectID/region alone and could change on
+      // redeploy — no Firebase Functions API exposes a function's own live
+      // *.run.app URL at runtime to construct it dynamically either.
+      const callbackUrl = `https://us-central1-${projectID.value()}.cloudfunctions.net/mtnWebhook?key=${encodeURIComponent(webhookSecret)}`;
+
+      const paymentResponse = await fetch(
+        `${baseHost}/collection/v1_0/requesttopay`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "X-Reference-Id": txRef,
+            "X-Target-Environment": targetEnv,
+            "Ocp-Apim-Subscription-Key": mtnSubKey.value(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            amount: amount.toString(),
+            currency: "UGX",
+            externalId: choirId,
+            payer: { partyIdType: "MSISDN", partyId: phone.replace("+256", "256") },
+            payerMessage: "KwayaPro Subscription",
+            payeeNote: "Monthly subscription payment",
+            callbackUrl,
+          }),
+        },
+      );
+
+      if (paymentResponse.status !== 202) {
+        const errorBody = await paymentResponse.text();
+        logger.error(`MTN payment initiation failed: ${errorBody}`);
+        res.status(502).json({error: "Payment initiation failed"});
+        return;
+      }
+
+      await db.collection("payment_requests").doc(txRef).set({
+        choirId, provider: "mtn", amount, phone, status: "pending", createdAt: FieldValue.serverTimestamp(),
+      });
+      res.json({ success: true, txRef });
+    } catch (e) {
+      logger.error("MTN payment error", e);
+      res.status(502).json({error: "Payment provider error"});
     }
   },
 );
 
-// ── Initiate Payment (Callable) ─────────────────────────────────
-export const initiatePayment = onRequest(
-  { cors: true, secrets: [mtnApiUser, mtnApiKey, mtnSubKey, mtnTargetEnv, airtelClientId, airtelClientSec] },
+// ── Cancel Subscription (Phase 3b) ────────────────────────────────
+// Pro -> Free downgrade. Same auth pattern as initiatePayment (verified ID
+// token), plus a server-side leader/director role check — not just "any
+// member", matching member_detail_screen.dart's own leader/director-only
+// permission-management gate. The client never writes subscriptions/choirs
+// plan fields directly; firestore.rules already blocks that
+// (`subscriptions` is `allow write: if false`, and while `choirs` update
+// technically allows leader/director client writes, routing this through a
+// Cloud Function keeps a single, auditable trust boundary for every plan
+// change rather than splitting it across two enforcement paths).
+//
+// Immediate effect, not "at period end" — see PHASE_3B_REPORT.md Fix B for
+// the full reasoning: initiatePayment only ever performs a one-time MTN
+// requesttopay charge, not a recurring subscription, and nothing in this
+// codebase (no scheduled function, no provider-side mechanism) tracks or
+// enforces a "current paid period" against subscriptions.endDate today —
+// that field is written but never read back by anything. There is no
+// coherent period to downgrade "at the end of," so downgrade takes effect
+// now.
+export const cancelSubscription = onRequest(
+  { cors: true },
   async (req, res) => {
     const authHeader = req.headers.authorization;
-    if (!authHeader) { res.status(401).json({error: "Unauthorized"}); return; }
-
-    const { provider, phone, amount, choirId } = req.body;
-    if (!provider || !phone || !amount || !choirId) {
-      res.status(400).json({error: "Missing required fields"}); return;
+    if (!authHeader?.startsWith("Bearer ")) {
+      res.status(401).json({error: "You must be signed in to do this."});
+      return;
     }
 
-    const txRef = `TXN-${choirId}-${Date.now()}`;
-
-    if (provider === "mtn") {
-      try {
-        const tokenResponse = await fetch(
-          "https://sandbox.momodeveloper.mtn.com/collection/token/",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Basic ${Buffer.from(`${mtnApiUser.value()}:${mtnApiKey.value()}`).toString("base64")}`,
-              "Ocp-Apim-Subscription-Key": mtnSubKey.value(),
-            },
-          },
-        );
-        const tokenData = await tokenResponse.json() as { access_token?: string };
-        const accessToken = tokenData.access_token;
-        if (!accessToken) {
-          res.status(502).json({error: "Failed to get MTN token"}); return;
-        }
-
-        const callbackUrl = `https://us-central1-kwayapro-production.cloudfunctions.net/mtnWebhook`;
-        const paymentResponse = await fetch(
-          `https://sandbox.momodeveloper.mtn.com/collection/v1_0/requesttopay`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              "X-Reference-Id": txRef,
-              "X-Target-Environment": mtnTargetEnv.value() || "sandbox",
-              "Ocp-Apim-Subscription-Key": mtnSubKey.value(),
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              amount: amount.toString(),
-              currency: "UGX",
-              externalId: choirId,
-              payer: { partyIdType: "MSISDN", partyId: phone.replace("+256", "256") },
-              payerMessage: "KwayaPro Subscription",
-              payeeNote: "Monthly subscription payment",
-              callbackUrl,
-            }),
-          },
-        );
-
-        if (paymentResponse.status === 202) {
-          await db.collection("payment_requests").doc(txRef).set({
-            choirId, provider: "mtn", amount, phone, status: "pending", createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
-          res.json({ success: true, txRef });
-        } else {
-          const errorBody = await paymentResponse.text();
-          logger.error(`MTN payment initiation failed: ${errorBody}`);
-          res.status(502).json({error: "Payment initiation failed"});
-        }
-      } catch (e) {
-        logger.error("MTN payment error", e);
-        res.status(502).json({error: "Payment provider error"});
-      }
-    } else if (provider === "airtel") {
-      try {
-        const authResponse = await fetch(
-          "https://openapi.airtel.africa/auth/oauth2/token",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              client_id: airtelClientId.value(),
-              client_secret: airtelClientSec.value(),
-              grant_type: "client_credentials",
-            }),
-          },
-        );
-        const authData = await authResponse.json() as { access_token?: string };
-        const accessToken = authData.access_token;
-        if (!accessToken) {
-          res.status(502).json({error: "Failed to get Airtel token"}); return;
-        }
-
-        const callbackUrl = `https://us-central1-kwayapro-production.cloudfunctions.net/airtelWebhook`;
-        const paymentResponse = await fetch(
-          "https://openapi.airtel.africa/merchant/v1/payments/",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${accessToken}`,
-              "X-Country": "UG",
-              "X-Currency": "UGX",
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              reference: txRef,
-              subscriber: { country: "UG", currency: "UGX", msisdn: phone },
-              transaction: { amount: amount.toString(), country: "UG", currency: "UGX", id: txRef },
-              callbackUrl,
-            }),
-          },
-        );
-
-        if (paymentResponse.status === 200 || paymentResponse.status === 201) {
-          await db.collection("payment_requests").doc(txRef).set({
-            choirId, provider: "airtel", amount, phone, status: "pending", createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
-          res.json({ success: true, txRef });
-        } else {
-          const errorBody = await paymentResponse.text();
-          logger.error(`Airtel payment initiation failed: ${errorBody}`);
-          res.status(502).json({error: "Payment initiation failed"});
-        }
-      } catch (e) {
-        logger.error("Airtel payment error", e);
-        res.status(502).json({error: "Payment provider error"});
-      }
-    } else {
-      res.status(400).json({error: "Unsupported provider"});
+    let uid: string;
+    try {
+      const idToken = authHeader.slice("Bearer ".length);
+      const decoded = await admin.auth().verifyIdToken(idToken);
+      uid = decoded.uid;
+    } catch (e) {
+      logger.warn("cancelSubscription: invalid ID token", e);
+      res.status(401).json({error: "Your session has expired. Please sign in again."});
+      return;
     }
+
+    const { choirId } = req.body as { choirId?: string };
+    if (!choirId || typeof choirId !== "string") {
+      res.status(400).json({error: "Missing choirId"});
+      return;
+    }
+
+    const membershipSnap = await db.collection("choir_memberships").doc(`${choirId}_${uid}`).get();
+    const role = membershipSnap.data()?.role;
+    if (role !== "leader" && role !== "director") {
+      res.status(403).json({error: "Only a choir leader or director can change the subscription plan."});
+      return;
+    }
+
+    const subRef = db.collection("subscriptions").doc(choirId);
+    const subSnap = await subRef.get();
+    if (!subSnap.exists || subSnap.data()?.status !== "active") {
+      res.status(409).json({error: "This choir doesn't have an active Pro subscription to cancel."});
+      return;
+    }
+
+    await subRef.update({ status: "cancelled" });
+    await db.collection("choirs").doc(choirId).update({ plan: "free" });
+
+    logger.info(`Subscription cancelled: choir=${choirId} by user=${uid}`);
+    res.json({ success: true, choirId });
   },
 );
 
@@ -390,10 +441,10 @@ export const initiatePayment = onRequest(
 export const mtnWebhook = onRequest(
   { cors: true, secrets: [mtnWebhookSec] },
   async (req, res) => {
-    const signature = req.headers["x-webhook-signature"] as string | undefined;
-    const expected = mtnWebhookSec.value();
-    if (expected && signature !== expected) {
-      res.status(403).json({error: "Invalid signature"}); return;
+    if (!isAuthorizedWebhookRequest(req, mtnWebhookSec.value())) {
+      logger.warn("mtnWebhook: rejected — missing or invalid webhook credentials");
+      res.status(403).json({error: "Invalid or missing webhook credentials"});
+      return;
     }
 
     const { referenceId, status } = req.body;
@@ -407,7 +458,21 @@ export const mtnWebhook = onRequest(
     }
 
     const data = paymentRef.data()!;
+
+    // Idempotency: MTN (like most payment providers) may retry a callback on
+    // timeout or a missing ack. A replayed callback must not re-extend the
+    // subscription or reprocess an already-completed request.
+    if (data.status === "completed") {
+      logger.info(`mtnWebhook: ${referenceId} already completed, ignoring replay`);
+      res.status(200).json({ success: true, alreadyProcessed: true });
+      return;
+    }
+
     const choirId = data.choirId as string;
+    if (!choirId) {
+      res.status(500).json({error: "Payment request is missing its choirId"});
+      return;
+    }
 
     if (status === "SUCCESSFUL") {
       const now = new Date();
@@ -416,8 +481,8 @@ export const mtnWebhook = onRequest(
       await db.collection("subscriptions").doc(choirId).set({
         plan: "pro",
         provider: "mtn",
-        startDate: admin.firestore.Timestamp.fromDate(now),
-        endDate: admin.firestore.Timestamp.fromDate(endDate),
+        startDate: Timestamp.fromDate(now),
+        endDate: Timestamp.fromDate(endDate),
         txRef: referenceId,
         status: "active",
       }, { merge: true });
@@ -434,50 +499,244 @@ export const mtnWebhook = onRequest(
   },
 );
 
-// ── Airtel Webhook ──────────────────────────────────────────────
-export const airtelWebhook = onRequest(
-  { cors: true, secrets: [airtelWebhookSec] },
+// ── Guest Director Join (Phase 2b) ───────────────────────────────
+// Replaces the old client-side flow (RehearsalRepository.validateGuestToken +
+// getSessionByToken + ChoirRepository.addGuestDirector), which self-created a
+// choir_memberships doc with role: 'director' directly from the client. That
+// write is now correctly blocked by firestore.rules (see PHASE_2_REPORT.md
+// §1) — self-elevation to 'director' can never be permitted from client-side
+// rules without reopening the vulnerability the rules were changed to close,
+// because a ChoirMembership document carries no reference back to the
+// rehearsal session/token that would justify it. Doing the grant here, with
+// the Admin SDK (which bypasses security rules), is the architecturally
+// correct place for it — and lets us enforce guestTokenExpiry server-side,
+// at the moment of grant, which resolves the original audit's "guest
+// director token expiry is only checked by a 30-minute scheduled cleanup"
+// finding for real.
+export const joinAsGuestDirector = onRequest(
+  { cors: true },
   async (req, res) => {
-    const signature = req.headers["x-webhook-signature"] as string | undefined;
-    const expected = airtelWebhookSec.value();
-    if (expected && signature !== expected) {
-      res.status(403).json({error: "Invalid signature"}); return;
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      res.status(401).json({ error: "You must be signed in to accept this invite." });
+      return;
     }
 
-    const { transaction: { id: referenceId } = {}, status_code: statusCode } = req.body;
-    if (!referenceId) {
-      res.status(400).json({error: "Missing transaction id"}); return;
+    let uid: string;
+    try {
+      const idToken = authHeader.slice("Bearer ".length);
+      const decoded = await admin.auth().verifyIdToken(idToken);
+      uid = decoded.uid;
+    } catch (e) {
+      logger.warn("joinAsGuestDirector: invalid ID token", e);
+      res.status(401).json({ error: "Your session has expired. Please sign in again." });
+      return;
     }
 
-    const paymentRef = await db.collection("payment_requests").doc(referenceId).get();
-    if (!paymentRef.exists) {
-      res.status(404).json({error: "Payment request not found"}); return;
+    const { token } = req.body as { token?: string };
+    if (!token || typeof token !== "string") {
+      res.status(400).json({ error: "Missing invite token." });
+      return;
     }
 
-    const data = paymentRef.data()!;
-    const choirId = data.choirId as string;
+    // Same lookup RehearsalRepository.validateGuestToken/getSessionByToken
+    // used to perform client-side — ported here rather than duplicated, this
+    // is now the single source of truth for guest-token validation.
+    const sessionQuery = await db.collection("rehearsal_sessions")
+      .where("guestToken", "==", token)
+      .limit(1)
+      .get();
 
-    if (statusCode === "200" || statusCode === "TS" || statusCode === "SUCCESS") {
-      const now = new Date();
-      const endDate = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-
-      await db.collection("subscriptions").doc(choirId).set({
-        plan: "pro",
-        provider: "airtel",
-        startDate: admin.firestore.Timestamp.fromDate(now),
-        endDate: admin.firestore.Timestamp.fromDate(endDate),
-        txRef: referenceId,
-        status: "active",
-      }, { merge: true });
-
-      await db.collection("choirs").doc(choirId).update({ plan: "pro" });
-      await paymentRef.ref.update({ status: "completed" });
-      logger.info(`Airtel payment completed: ${referenceId}`);
-    } else {
-      await paymentRef.ref.update({ status: "failed" });
-      logger.warn(`Airtel payment failed: ${referenceId}`);
+    if (sessionQuery.empty) {
+      res.status(404).json({ error: "This invite link is invalid or has already been used." });
+      return;
     }
 
-    res.status(200).json({ success: true });
+    const sessionDoc = sessionQuery.docs[0];
+    const session = sessionDoc.data();
+
+    const expiryTimestamp = session.guestTokenExpiry as Timestamp | undefined;
+    if (!session.isGuestDirector || !expiryTimestamp) {
+      res.status(410).json({ error: "This invite link has been revoked." });
+      return;
+    }
+    if (new Date() >= expiryTimestamp.toDate()) {
+      res.status(410).json({ error: "This invite link has expired." });
+      return;
+    }
+
+    const choirId = session.choirId as string;
+    if (!choirId) {
+      res.status(500).json({ error: "This rehearsal session is missing its choir." });
+      return;
+    }
+
+    const membershipRef = db.collection("choir_memberships").doc(`${choirId}_${uid}`);
+    const existingSnap = await membershipRef.get();
+    const existingData = existingSnap.data();
+
+    // Don't clobber an existing leader/director's own membership with a
+    // guest grant — they already have full access.
+    if (existingData?.role === "leader" || existingData?.role === "director") {
+      res.json({ success: true, choirId, sessionId: sessionDoc.id, alreadyMember: true });
+      return;
+    }
+
+    // Real display name, denormalized onto the membership doc (Phase 2b Fix
+    // 2) rather than a generic placeholder — Admin SDK reads bypass rules,
+    // so this cross-user users/{uid} read is fine here even though the
+    // client can no longer do the equivalent read itself.
+    const userDoc = await db.collection("users").doc(uid).get();
+    const displayName = (userDoc.data()?.name as string | undefined)?.trim() || "Guest Director";
+
+    await membershipRef.set({
+      choirId,
+      userId: uid,
+      name: displayName,
+      role: "director",
+      defaultVoicePart: existingData?.defaultVoicePart ?? "S",
+      permissions: ["audio_uploader", "attendance_manager", "song_program_planner"],
+      joinedAt: existingData?.joinedAt ?? FieldValue.serverTimestamp(),
+      guestSessionId: sessionDoc.id,
+    }, { merge: true });
+
+    // Single-use: consume the token immediately so it can't be replayed by a
+    // second person (or reused after the fact). The prior client-side flow
+    // never invalidated the token after use — anyone with the link could
+    // join repeatedly, by design or not, until the 30-minute scheduled
+    // cleanup or a manual revoke. This closes that gap.
+    //
+    // (Phase 3 note: every FieldValue/Timestamp usage in this file was
+    // migrated to this modular firebase-admin/firestore import — see
+    // PHASE_3_REPORT.md Fix 0b for why: the admin.firestore.FieldValue/
+    // .Timestamp namespace reproducibly threw "Cannot read properties of
+    // undefined" inside the actual Functions Emulator, most likely because
+    // functions/package.json declared an unsupported Node 24 runtime — now
+    // fixed to Node 20. The modular import is used everywhere regardless,
+    // as defense in depth.)
+    await sessionDoc.ref.update({
+      guestToken: FieldValue.delete(),
+      guestTokenExpiry: FieldValue.delete(),
+    });
+
+    logger.info(`Guest director granted: choir=${choirId} session=${sessionDoc.id} user=${uid}`);
+    res.json({
+      success: true,
+      choirId,
+      sessionId: sessionDoc.id,
+      title: session.title ?? null,
+    });
   },
 );
+
+// ── Invite-code lookup + uniqueness check (server-side, same rationale as
+// joinAsGuestDirector above) ──────────────────────────────────────────────
+// choir_repository.dart's getChoirByInviteCode/generateUniqueInviteCode used
+// to run `where('inviteCode', isEqualTo: ...)` queries directly against
+// Firestore. Firestore security rules can only authorize a query when the
+// rule is expressible purely in terms of resource.data + request.auth — they
+// cannot check "the caller already knows this specific code", so the only
+// rule that made those queries succeed was `allow read: if isAuthenticated()`,
+// which really means "any signed-in user can list the entire choirs
+// collection", dumping every choir's invite code, not just the one being
+// looked up. That defeats the entire "you need the code" model. Moving the
+// lookup here (Admin SDK bypasses rules) lets the rule stay
+// isTenantMember(choirId)-only while still letting new, non-member users
+// resolve a code they were actually given.
+function verifyBearerAuth(req: {headers: {authorization?: string}}): Promise<string> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    return Promise.reject(new Error("unauthenticated"));
+  }
+  return admin.auth().verifyIdToken(authHeader.slice("Bearer ".length)).then((d) => d.uid);
+}
+
+export const lookupChoirByInviteCode = onRequest(
+  { cors: true },
+  async (req, res) => {
+    try {
+      await verifyBearerAuth(req);
+    } catch {
+      res.status(401).json({ error: "You must be signed in." });
+      return;
+    }
+
+    const code = (req.body as { code?: string })?.code;
+    if (!code || typeof code !== "string") {
+      res.status(400).json({ error: "Missing invite code." });
+      return;
+    }
+
+    const query = await db.collection("choirs")
+      .where("inviteCode", "==", code)
+      .limit(1)
+      .get();
+
+    if (query.empty) {
+      res.status(404).json({ error: "Invalid invite code." });
+      return;
+    }
+
+    const choir = query.docs[0].data();
+    // Minimal response — deliberately omits leaderId, plan, songCount, and
+    // the inviteCode itself, none of which the join UI needs.
+    res.json({
+      choirId: query.docs[0].id,
+      name: choir.name ?? "",
+      churchName: choir.churchName ?? "",
+    });
+  },
+);
+
+export const checkInviteCodeAvailable = onRequest(
+  { cors: true },
+  async (req, res) => {
+    try {
+      await verifyBearerAuth(req);
+    } catch {
+      res.status(401).json({ error: "You must be signed in." });
+      return;
+    }
+
+    const code = (req.body as { code?: string })?.code;
+    if (!code || typeof code !== "string") {
+      res.status(400).json({ error: "Missing invite code." });
+      return;
+    }
+
+    const query = await db.collection("choirs")
+      .where("inviteCode", "==", code)
+      .limit(1)
+      .get();
+
+    res.json({ available: query.empty });
+  },
+);
+
+// ── Propagate display-name changes onto choir_memberships (Phase 2b Fix 2) ──
+// Denormalizing name onto choir_memberships (see joinChoir, onboarding_screen
+// choir creation, and joinAsGuestDirector above) means membership docs no
+// longer track a user's later name changes automatically. This trigger keeps
+// them in sync going forward. It does NOT backfill existing membership docs
+// that still hold the old 'Member'/'Leader' placeholders — see
+// functions/scripts/backfill-membership-names.js for a one-time fix for
+// those, which needs to be run once by whoever holds project credentials.
+export const onUserProfileUpdated = onDocumentUpdated("users/{userId}", async (event) => {
+  const before = event.data?.before.data();
+  const after = event.data?.after.data();
+  if (!after) return;
+  if (before?.name === after.name) return;
+
+  const userId = event.params.userId;
+  const memberships = await db.collection("choir_memberships").where("userId", "==", userId).get();
+  if (memberships.empty) return;
+
+  const batch = db.batch();
+  memberships.docs.forEach((doc) => {
+    batch.update(doc.ref, { name: after.name });
+  });
+  await batch.commit();
+  logger.info(`Propagated name change for user ${userId} to ${memberships.size} membership(s)`);
+});
+
+// -- Airtel Webhook disabled --

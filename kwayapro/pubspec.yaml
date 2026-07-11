@@ -45,6 +45,7 @@ dependencies:
   cloud_firestore: ^5.0.0
   firebase_storage: ^12.0.0
   firebase_messaging: ^15.0.0
+  google_sign_in: ^6.2.1
 
   # Audio
   just_audio: ^0.9.36
@@ -88,6 +89,27 @@ dev_dependencies:
   fake_cloud_firestore: ^3.0.0
   firebase_auth_mocks: ^0.14.0
   mocktail: ^1.0.4
+  path_provider_platform_interface: ^2.1.2
+  connectivity_plus_platform_interface: ^2.1.0
+  plugin_platform_interface: ^2.1.8
+  flutter_launcher_icons: ^0.14.4
+
+# Phase 6b: generates real Android launcher icons (replacing the stock
+# Flutter placeholder) from the brand SVG mark, rasterized to PNG via sharp
+# since flutter_launcher_icons' documented config expects PNG sources, not
+# SVG (pub.dev/packages/flutter_launcher_icons). Run with:
+#   dart run flutter_launcher_icons
+# adaptive_icon_background is the exact flat brand color documented as the
+# canonical "Implementation Snippet" background in
+# docs/KwayaProBrandIndentity.html (also the literal fill already used in
+# kwayapro_app_icon.svg) — not an arbitrary/guessed fill. Android-only per
+# Phase 6b's scope; iOS icons are untouched (see PHASE_6B_REPORT.md).
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon_source/icon_full_1024.png"
+  adaptive_icon_background: "#FFD97D"
+  adaptive_icon_foreground: "assets/icon_source/icon_foreground_1024.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

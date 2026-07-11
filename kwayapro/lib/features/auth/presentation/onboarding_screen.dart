@@ -55,6 +55,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   final _choirNameController = TextEditingController();
   final _churchNameController = TextEditingController();
   final _inviteCodeController = TextEditingController();
+  final _createFormKey = GlobalKey<FormState>();
   String? _pendingChoirId;
 
   // Step 5: Voice Part
@@ -73,11 +74,14 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     _choirNameController.dispose();
     _churchNameController.dispose();
     _inviteCodeController.dispose();
+    _emailController.dispose();
+    _passwordController.dispose();
     super.dispose();
   }
 
   void _nextStep() => setState(() => _step++);
   void _prevStep() => setState(() => _step--);
+
 
   Future<void> _sendPhoneCode({bool isResend = false}) async {
     final phoneStr = _phoneController.text.trim();
@@ -277,6 +281,39 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     }
   }
 
+  Future<void> _signInWithGoogle() async {
+    setState(() => _isLoading = true);
+    try {
+      final repo = ref.read(authRepositoryProvider);
+      final result = await repo.signInWithGoogle();
+      if (result == null) {
+        // User cancelled the account picker
+        setState(() => _isLoading = false);
+        return;
+      }
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _step = 3; // Skip to profile step
+        });
+      }
+    } on FirebaseAuthException catch (e) {
+      setState(() => _isLoading = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Google sign-in failed: ${e.message}')),
+        );
+      }
+    } catch (e) {
+      setState(() => _isLoading = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Google sign-in failed: $e')),
+        );
+      }
+    }
+  }
+
   Future<void> _pickImage() async {
     final pickedFile = await _imagePicker.pickImage(source: ImageSource.gallery);
     if (pickedFile != null) {
@@ -341,25 +378,36 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       final db = FirebaseFirestore.instance;
       final batch = db.batch();
 
-      // 1. User
+      // 1. User — use merge so we don't overwrite existing profile data
       final userRef = db.collection('users').doc(user.uid);
-      batch.set(userRef, AppUser(
-        userId: user.uid,
-        name: _nameController.text.trim(),
-        phone: user.phoneNumber ?? '',
-        createdAt: DateTime.now(),
-      ).toJson());
+      final userName = _nameController.text.trim().isNotEmpty
+          ? _nameController.text.trim()
+          : (user.displayName ?? user.phoneNumber ?? 'User');
+      batch.set(
+        userRef,
+        AppUser(
+          userId: user.uid,
+          name: userName,
+          phone: user.phoneNumber ?? '',
+          createdAt: DateTime.now(),
+        ).toJson(),
+        SetOptions(merge: true),
+      );
 
       // 2a. Create Choir
       if (_isCreating) {
         final choirRef = db.collection('choirs').doc();
         final choirId = choirRef.id;
+        // Phase 4 Fix 6: checked-and-retried for uniqueness before use,
+        // rather than a raw unchecked generate() — see
+        // ChoirRepository.generateUniqueInviteCode.
+        final inviteCode = await ChoirRepository().generateUniqueInviteCode();
         batch.set(choirRef, Choir(
           choirId: choirId,
           name: _choirNameController.text.trim(),
           churchName: _churchNameController.text.trim(),
           leaderId: user.uid,
-          inviteCode: ChoirRepository.generateInviteCode(),
+          inviteCode: inviteCode,
           plan: ChoirPlan.free,
           songCount: 0,
           createdAt: DateTime.now(),
@@ -369,7 +417,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         batch.set(membershipRef, ChoirMembership(
           choirId: choirId,
           userId: user.uid,
-          name: user.displayName ?? 'Leader',
+          name: userName,
           role: MemberRole.leader,
           defaultVoicePart: _selectedPart!,
           permissions: [],
@@ -385,7 +433,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         batch.set(membershipRef, ChoirMembership(
           choirId: _pendingChoirId!,
           userId: user.uid,
-          name: user.displayName ?? 'Member',
+          name: userName,
           role: MemberRole.chorister,
           defaultVoicePart: _selectedPart!,
           permissions: [],
@@ -394,6 +442,9 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       }
 
       await batch.commit();
+
+      // Mark onboarding complete
+      await ref.read(userRepositoryProvider).markOnboardingComplete(user.uid);
 
       // Clear pending invite
       ref.read(pendingInviteCodeProvider.notifier).state = null;
@@ -419,6 +470,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
       body: SafeArea(
         child: AnimatedSwitcher(
           duration: const Duration(milliseconds: 300),
@@ -477,8 +529,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   }
 
   Widget _buildPhoneStep() {
-    return Padding(
-      key: const ValueKey('phone'),
+    return SingleChildScrollView(
+      key: ValueKey('phone_$_authMethod'),
       padding: const EdgeInsets.all(24.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -586,12 +638,29 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                 Expanded(
                   child: FilledButton(
                     onPressed: _isLoading ? null : _signInWithEmail,
-                    child: _isLoading 
+                    child: _isLoading
                         ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                         : const Text('Sign In'),
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 24),
+            Row(
+              children: [
+                Expanded(child: Divider(color: Theme.of(context).colorScheme.outlineVariant)),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Text('OR', style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                ),
+                Expanded(child: Divider(color: Theme.of(context).colorScheme.outlineVariant)),
+              ],
+            ),
+            const SizedBox(height: 24),
+            OutlinedButton.icon(
+              onPressed: _isLoading ? null : _signInWithGoogle,
+              icon: const Icon(Icons.g_mobiledata, size: 28),
+              label: const Text('Continue with Google'),
             ),
           ],
         ],
@@ -600,7 +669,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   }
 
   Widget _buildOTPStep() {
-    return Padding(
+    return SingleChildScrollView(
       key: const ValueKey('otp'),
       padding: const EdgeInsets.all(24.0),
       child: Column(
@@ -666,7 +735,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   }
 
   Widget _buildProfileStep() {
-    return Padding(
+    return SingleChildScrollView(
       key: const ValueKey('profile'),
       padding: const EdgeInsets.all(24.0),
       child: Column(
@@ -701,7 +770,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
               border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
             ),
           ),
-          const Spacer(),
+          const SizedBox(height: 24),
           FilledButton(
             onPressed: _submitProfile,
             child: const Text('Next'),
@@ -712,8 +781,9 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   }
 
   Widget _buildJoinOrCreateStep() {
-    return Padding(
-      key: const ValueKey('join_create'),
+    final stepKey = _isCreating ? 'create' : (_isJoining ? 'join' : 'choice');
+    return SingleChildScrollView(
+      key: ValueKey('join_create_$stepKey'),
       padding: const EdgeInsets.all(24.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -775,56 +845,70 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             const SizedBox(height: 24),
             Row(
               children: [
-                TextButton(
-                  onPressed: () => setState(() => _isJoining = false),
-                  child: const Text('Back'),
+                Flexible(
+                  child: TextButton(
+                    onPressed: () => setState(() => _isJoining = false),
+                    child: const Text('Back'),
+                  ),
                 ),
                 const Spacer(),
-                FilledButton(
-                  onPressed: _isLoading ? null : _joinChoir,
-                  child: _isLoading 
-                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                      : const Text('Verify Code'),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: _isLoading ? null : _joinChoir,
+                    child: _isLoading
+                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                        : const Text('Verify Code'),
+                  ),
                 ),
               ],
             ),
           ] else if (_isCreating) ...[
-            TextFormField(
-              controller: _choirNameController,
-              decoration: const InputDecoration(
-                labelText: 'Choir Name',
-                border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+            Form(
+              key: _createFormKey,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  TextFormField(
+                    controller: _choirNameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Choir Name',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+                    ),
+                    validator: (v) => v == null || v.trim().isEmpty ? 'Enter a choir name' : null,
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _churchNameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Church/Parish Name',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+                    ),
+                    validator: (v) => v == null || v.trim().isEmpty ? 'Enter a parish name' : null,
+                  ),
+                  const SizedBox(height: 24),
+                  Row(
+                    children: [
+                      Flexible(
+                        child: TextButton(
+                          onPressed: () => setState(() => _isCreating = false),
+                          child: const Text('Back'),
+                        ),
+                      ),
+                      const Spacer(),
+                      Expanded(
+                        child: FilledButton(
+                          onPressed: () {
+                            if (_createFormKey.currentState!.validate()) {
+                              _nextStep();
+                            }
+                          },
+                          child: const Text('Next'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
-            ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _churchNameController,
-              decoration: const InputDecoration(
-                labelText: 'Church/Parish Name',
-                border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
-              ),
-            ),
-            const Spacer(),
-            Row(
-              children: [
-                TextButton(
-                  onPressed: () => setState(() => _isCreating = false),
-                  child: const Text('Back'),
-                ),
-                const Spacer(),
-                FilledButton(
-                  onPressed: () {
-                    if (_choirNameController.text.isNotEmpty && _churchNameController.text.isNotEmpty) {
-                      _nextStep();
-                    } else {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Please fill all fields')),
-                      );
-                    }
-                  },
-                  child: const Text('Next'),
-                ),
-              ],
             ),
           ]
         ],
@@ -833,7 +917,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
   }
 
   Widget _buildVoicePartStep() {
-    return Padding(
+    return SingleChildScrollView(
       key: const ValueKey('voice_part'),
       padding: const EdgeInsets.all(24.0),
       child: Column(
@@ -864,7 +948,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             ),
             const SizedBox(height: 16),
           ],
-          const Spacer(),
+          const SizedBox(height: 24),
           FilledButton(
             onPressed: _selectedPart == null || _isLoading ? null : _finishSetup,
             child: _isLoading 
