@@ -23,8 +23,22 @@ class MiniPlayerBar extends ConsumerWidget {
         _ErrorBanner(theme: theme),
         Container(
           height: 68,
+          clipBehavior: Clip.antiAlias,
+          // M3 SHAPE COMPLIANCE FOLLOW-UP FIX: this Container had no shape at
+          // all (sharp default corners), inconsistent with the rest of the
+          // app's M3 Expressive rounded-corner language defined in
+          // app_theme.dart. Reusing the Card token (24dp — see
+          // `cardTheme.shape` in app_theme.dart, also used for the song
+          // cards this bar sits directly below in library_screen.dart /
+          // song_list_item.dart) rather than inventing a new radius. Only
+          // the top corners are rounded, matching the same top-only idiom
+          // app_theme.dart's bottomSheetTheme and home_screen.dart's choir
+          // switcher sheet use for surfaces anchored to the bottom edge —
+          // the bottom edge here sits flush above the NavigationBar, not a
+          // floating edge, so it stays square.
           decoration: BoxDecoration(
             color: theme.colorScheme.surfaceContainerHigh,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
             border: Border(
               top: BorderSide(
                 color: theme.colorScheme.outlineVariant,
@@ -130,9 +144,22 @@ class MiniPlayerBar extends ConsumerWidget {
                       Consumer(
                         builder: (context, ref, _) {
                           final speed = ref.watch(audioPlayerProvider.select((s) => s.playbackSpeed));
+                          // M3 SHAPE COMPLIANCE FOLLOW-UP FIX: StadiumBorder
+                          // here already matches app_theme.dart's button
+                          // token (pill shape, see filledButtonTheme /
+                          // outlinedButtonTheme / textButtonTheme, all
+                          // `BorderRadius.circular(50)` — a StadiumBorder is
+                          // that same pill shape expressed without a fixed
+                          // radius number). What was missing was
+                          // `clipBehavior` — a Material's `shape` alone only
+                          // affects its own painted background, it doesn't
+                          // clip descendant InkWell ripples to that shape by
+                          // default, so the ripple could bleed past the
+                          // pill's rounded ends into a rectangle.
                           return Material(
                             color: Colors.transparent,
                             shape: const StadiumBorder(),
+                            clipBehavior: Clip.antiAlias,
                             child: InkWell(
                               customBorder: const StadiumBorder(),
                               onTap: () => _showSpeedSelector(context, ref),
@@ -202,23 +229,33 @@ class MiniPlayerBar extends ConsumerWidget {
                           // Replaced with a plain IconButton on top of a
                           // manually drawn filled circle — same M3 "filled
                           // icon button" look, without that extra machinery.
-                          return Container(
-                            decoration: BoxDecoration(
-                              color: theme.colorScheme.primary,
-                              shape: BoxShape.circle,
-                            ),
-                            child: IconButton(
-                              icon: Icon(
-                                isPlaying ? Icons.pause : Icons.play_arrow,
-                                color: theme.colorScheme.onPrimary,
+                          // M3 SHAPE COMPLIANCE FOLLOW-UP FIX: BoxShape.circle
+                          // is already the correct M3 "filled icon button"
+                          // shape (matches what IconButton.filled itself
+                          // draws), but a plain Container doesn't clip its
+                          // child by default — the IconButton's own ripple
+                          // could paint square corners peeking out past the
+                          // circle underneath. ClipOval guarantees the
+                          // ripple is bounded to the same circle.
+                          return ClipOval(
+                            child: Container(
+                              decoration: BoxDecoration(
+                                color: theme.colorScheme.primary,
+                                shape: BoxShape.circle,
                               ),
-                              onPressed: () {
-                                if (isPlaying) {
-                                  ref.read(audioPlayerProvider.notifier).pause();
-                                } else {
-                                  ref.read(audioPlayerProvider.notifier).resume();
-                                }
-                              },
+                              child: IconButton(
+                                icon: Icon(
+                                  isPlaying ? Icons.pause : Icons.play_arrow,
+                                  color: theme.colorScheme.onPrimary,
+                                ),
+                                onPressed: () {
+                                  if (isPlaying) {
+                                    ref.read(audioPlayerProvider.notifier).pause();
+                                  } else {
+                                    ref.read(audioPlayerProvider.notifier).resume();
+                                  }
+                                },
+                              ),
                             ),
                           );
                         },
@@ -294,7 +331,11 @@ class _ErrorBanner extends ConsumerWidget {
     if (error == null) return const SizedBox.shrink();
     return Container(
       width: double.infinity,
-      color: theme.colorScheme.errorContainer,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: theme.colorScheme.errorContainer,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+      ),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: Text(
         error,
