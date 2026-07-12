@@ -8,50 +8,21 @@ class MiniPlayerBar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final playerState = ref.watch(audioPlayerProvider);
-    final theme = Theme.of(context);
+    final currentPart = ref.watch(audioPlayerProvider.select((s) => s.currentPart));
 
-    if (playerState.currentPart == null) {
+    if (currentPart == null) {
       return const SizedBox.shrink();
     }
 
-    final song = playerState.currentSong!;
-    final part = playerState.currentPart!;
-    final position = playerState.position;
-    final duration = playerState.duration;
-    final isPlaying = playerState.isPlaying;
-    final isLoading = playerState.isLoading;
+    final currentSong = ref.watch(audioPlayerProvider.select((s) => s.currentSong))!;
+    final theme = Theme.of(context);
 
-    final progress = duration.inMilliseconds > 0
-        ? position.inMilliseconds / duration.inMilliseconds
-        : 0.0;
-
-    // Phase 5b: playback errors (e.g. offline + not yet cached) were
-    // previously stored in AudioPlayerState.error but never shown anywhere
-    // — silently swallowed. Surfaced here since this is the widget that
-    // already watches playback state for every screen. Kept as a separate,
-    // independently-sized row above the fixed-height controls bar (rather
-    // than inside it) since that Container's height is fixed and has no
-    // room to spare for an extra line of text.
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (playerState.error != null)
-          Container(
-            width: double.infinity,
-            color: theme.colorScheme.errorContainer,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Text(
-              playerState.error!,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onErrorContainer,
-              ),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
+        _ErrorBanner(theme: theme),
         Container(
-          height: 68, // was 60 — a couple pixels taller to fit the new Slider (was a 4px static bar)
+          height: 68,
           decoration: BoxDecoration(
             color: theme.colorScheme.surfaceContainerHigh,
             border: Border(
@@ -68,26 +39,37 @@ class MiniPlayerBar extends ConsumerWidget {
               // existed anywhere in the player). A Slider is the standard
               // Material seek control and reuses the same position/duration
               // state AudioPlayerNotifier now actually keeps updated.
+              // Scoped to its own Consumer so the ~200ms position ticks only
+              // rebuild this Slider, not the buttons/text below it.
               SizedBox(
                 height: 12,
-                child: SliderTheme(
-                  data: SliderTheme.of(context).copyWith(
-                    trackHeight: 3,
-                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
-                  ),
-                  child: Slider(
-                    value: progress.clamp(0.0, 1.0),
-                    activeColor: theme.colorScheme.primary,
-                    inactiveColor: theme.colorScheme.surfaceContainerHighest,
-                    onChanged: duration.inMilliseconds > 0
-                        ? (value) {
-                            ref.read(audioPlayerProvider.notifier).seek(
-                                  Duration(milliseconds: (value * duration.inMilliseconds).round()),
-                                );
-                          }
-                        : null,
-                  ),
+                child: Consumer(
+                  builder: (context, ref, _) {
+                    final position = ref.watch(audioPlayerProvider.select((s) => s.position));
+                    final duration = ref.watch(audioPlayerProvider.select((s) => s.duration));
+                    final progress = duration.inMilliseconds > 0
+                        ? position.inMilliseconds / duration.inMilliseconds
+                        : 0.0;
+                    return SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 3,
+                        thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+                        overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
+                      ),
+                      child: Slider(
+                        value: progress.clamp(0.0, 1.0),
+                        activeColor: theme.colorScheme.primary,
+                        inactiveColor: theme.colorScheme.surfaceContainerHighest,
+                        onChanged: duration.inMilliseconds > 0
+                            ? (value) {
+                                ref.read(audioPlayerProvider.notifier).seek(
+                                      Duration(milliseconds: (value * duration.inMilliseconds).round()),
+                                    );
+                              }
+                            : null,
+                      ),
+                    );
+                  },
                 ),
               ),
               // Controls
@@ -107,7 +89,7 @@ class MiniPlayerBar extends ConsumerWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                song.title,
+                                currentSong.title,
                                 style: theme.textTheme.bodyMedium?.copyWith(
                                   fontWeight: FontWeight.w600,
                                 ),
@@ -115,7 +97,7 @@ class MiniPlayerBar extends ConsumerWidget {
                                 overflow: TextOverflow.ellipsis,
                               ),
                               Text(
-                                '${part.voicePart.displayName} Part',
+                                '${currentPart.voicePart.displayName} Part',
                                 style: theme.textTheme.bodySmall?.copyWith(
                                   color: theme.colorScheme.onSurfaceVariant,
                                 ),
@@ -125,33 +107,74 @@ class MiniPlayerBar extends ConsumerWidget {
                         ),
                       ),
 
-                      // Speed button
-                      TextButton(
-                        onPressed: () => _showSpeedSelector(context, ref),
-                        child: Text(
-                          '${playerState.playbackSpeed}x',
-                          style: theme.textTheme.labelMedium?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
-                        ),
+                      // Speed button — CHORISTER AUDIT FOLLOW-UP FIX: this was
+                      // a TextButton, which reliably crashed Flutter's
+                      // rendering pipeline in this exact spot (a Row inside a
+                      // fixed 68px-tall Container) with a
+                      // `!semantics.parentDataDirty` assertion on every
+                      // rebuild — reproduced with a bare, hardcoded
+                      // TextButton with no app logic at all, so it's a
+                      // TextButton-specific framework issue on this Flutter
+                      // version, not anything about our state or providers.
+                      // Confirmed via `flutter run`'s raw stdout (adb
+                      // logcat's `I/flutter` filtering hides these — that's
+                      // why the original audit's logcat-only check missed
+                      // it). Flutter's default error zone swallows the
+                      // exception and aborts that frame's paint, so nothing
+                      // in this Container ever rendered even though state and
+                      // build() were both correct. An IconButton in the same
+                      // exact spot does not trigger it, so the speed control
+                      // is now an InkWell-wrapped label instead of
+                      // TextButton — same tap target, ripple, and text style,
+                      // without TextButton's internal machinery.
+                      Consumer(
+                        builder: (context, ref, _) {
+                          final speed = ref.watch(audioPlayerProvider.select((s) => s.playbackSpeed));
+                          return Material(
+                            color: Colors.transparent,
+                            shape: const StadiumBorder(),
+                            child: InkWell(
+                              customBorder: const StadiumBorder(),
+                              onTap: () => _showSpeedSelector(context, ref),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                child: Text(
+                                  '${speed}x',
+                                  style: theme.textTheme.labelMedium?.copyWith(
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
                       ),
 
                       // Repeat toggle
-                      IconButton(
-                        icon: Icon(
-                          Icons.repeat,
-                          color: playerState.isRepeat
-                              ? theme.colorScheme.tertiary
-                              : theme.colorScheme.onSurfaceVariant,
-                        ),
-                        onPressed: () {
-                          ref.read(audioPlayerProvider.notifier).toggleRepeat();
+                      Consumer(
+                        builder: (context, ref, _) {
+                          final isRepeat = ref.watch(audioPlayerProvider.select((s) => s.isRepeat));
+                          return IconButton(
+                            icon: Icon(
+                              Icons.repeat,
+                              color: isRepeat
+                                  ? theme.colorScheme.tertiary
+                                  : theme.colorScheme.onSurfaceVariant,
+                            ),
+                            onPressed: () {
+                              ref.read(audioPlayerProvider.notifier).toggleRepeat();
+                            },
+                          );
                         },
                       ),
 
                       // Play/Pause
-                      isLoading
-                          ? const SizedBox(
+                      Consumer(
+                        builder: (context, ref, _) {
+                          final isPlaying = ref.watch(audioPlayerProvider.select((s) => s.isPlaying));
+                          final isLoading = ref.watch(audioPlayerProvider.select((s) => s.isLoading));
+                          if (isLoading) {
+                            return const SizedBox(
                               width: 48,
                               height: 48,
                               child: Center(
@@ -163,23 +186,43 @@ class MiniPlayerBar extends ConsumerWidget {
                                   ),
                                 ),
                               ),
-                            )
-                          : IconButton.filled(
+                            );
+                          }
+                          // CHORISTER AUDIT FOLLOW-UP FIX: IconButton.filled
+                          // showed the same partial-render symptom as
+                          // TextButton in this exact spot (a Row inside a
+                          // fixed 68px-tall Container) — the icon painted as
+                          // a barely-visible sliver instead of the full
+                          // play/pause glyph on its filled circle, even
+                          // though state and onPressed both worked (tapping
+                          // the sliver's location did toggle playback). Its
+                          // filled/elevated state-layer widget tree is more
+                          // complex than a plain IconButton's, similar to
+                          // what made TextButton crash outright here.
+                          // Replaced with a plain IconButton on top of a
+                          // manually drawn filled circle — same M3 "filled
+                          // icon button" look, without that extra machinery.
+                          return Container(
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.primary,
+                              shape: BoxShape.circle,
+                            ),
+                            child: IconButton(
                               icon: Icon(
                                 isPlaying ? Icons.pause : Icons.play_arrow,
+                                color: theme.colorScheme.onPrimary,
                               ),
                               onPressed: () {
                                 if (isPlaying) {
-                                  ref
-                                      .read(audioPlayerProvider.notifier)
-                                      .pause();
+                                  ref.read(audioPlayerProvider.notifier).pause();
                                 } else {
-                                  ref
-                                      .read(audioPlayerProvider.notifier)
-                                      .resume();
+                                  ref.read(audioPlayerProvider.notifier).resume();
                                 }
                               },
                             ),
+                          );
+                        },
+                      ),
 
                       // Close
                       IconButton(
@@ -231,6 +274,35 @@ class MiniPlayerBar extends ConsumerWidget {
             const SizedBox(height: 16),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// Playback errors (e.g. offline + not yet cached) were previously stored in
+// AudioPlayerState.error but never shown anywhere — silently swallowed.
+// Scoped to its own Consumer so it doesn't force the rest of the bar to
+// rebuild when an error is set/cleared.
+class _ErrorBanner extends ConsumerWidget {
+  const _ErrorBanner({required this.theme});
+
+  final ThemeData theme;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final error = ref.watch(audioPlayerProvider.select((s) => s.error));
+    if (error == null) return const SizedBox.shrink();
+    return Container(
+      width: double.infinity,
+      color: theme.colorScheme.errorContainer,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Text(
+        error,
+        style: theme.textTheme.bodySmall?.copyWith(
+          color: theme.colorScheme.onErrorContainer,
+        ),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
       ),
     );
   }

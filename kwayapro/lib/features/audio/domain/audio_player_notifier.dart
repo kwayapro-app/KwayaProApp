@@ -123,7 +123,16 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       final cachedPath = await _audioCache.getCachedPath(part.audioUrl);
       if (cachedPath != null) {
         await _player.setFilePath(cachedPath);
-        await _player.play();
+        // CHORISTER AUDIT FOLLOW-UP FIX: just_audio's `play()` Future only
+        // completes when playback stops (paused/completed), not when it
+        // starts — per pub.dev docs (AudioPlayer.play()). Awaiting it here
+        // meant `isLoading` never flipped back to false until the chorister
+        // paused or the track ended, so the play/pause button stayed stuck
+        // showing a spinner the entire time audio was actually playing
+        // (confirmed on-device: position kept advancing while the button
+        // never rendered). Fire-and-forget instead — `setUrl`/`setFilePath`
+        // having resolved is what actually indicates playback has started.
+        unawaited(_player.play());
         state = state.copyWith(isLoading: false);
         unawaited(_logListen(part, song));
         return;
@@ -144,7 +153,7 @@ class AudioPlayerNotifier extends Notifier<AudioPlayerState> {
       }
 
       await _player.setUrl(part.audioUrl);
-      await _player.play();
+      unawaited(_player.play());
       state = state.copyWith(isLoading: false);
       unawaited(_logListen(part, song));
 

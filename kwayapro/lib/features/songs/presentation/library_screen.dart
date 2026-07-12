@@ -5,7 +5,6 @@ import 'package:file_picker/file_picker.dart';
 import 'package:uuid/uuid.dart';
 import '../../../shared/models/enums.dart';
 import '../../audio/domain/audio_player_notifier.dart';
-import '../../audio/presentation/widgets/mini_player_bar.dart';
 import '../../audio/data/audio_repository.dart';
 import '../../choir/domain/choir_providers.dart';
 import '../../../shared/utils/permission_checker.dart';
@@ -224,9 +223,6 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
               child: const Icon(Icons.add),
             )
           : null,
-      
-      // Mini player at bottom
-      bottomSheet: const MiniPlayerBar(),
     );
   }
 
