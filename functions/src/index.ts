@@ -1041,8 +1041,4 @@ export const onUserProfileUpdated = onDocumentUpdated("users/{userId}", async (e
   logger.info(`Propagated name change for user ${userId} to ${memberships.size} membership(s)`);
 });
 
-// [REDACTED FROM HISTORY: unauthenticated password-reset debug endpoint]
-
-// [REDACTED FROM HISTORY: unauthenticated invite-code-leak debug endpoint]
-
 // -- Airtel Webhook disabled --
