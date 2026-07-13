@@ -216,7 +216,31 @@ class HomeScreen extends ConsumerWidget {
                       _buildActionChip(context, Icons.people, 'Members', () => context.push('/members')),
                       const SizedBox(width: 12),
                       _buildActionChip(context, Icons.payment, 'Billing', () => context.push('/billing')),
+                      const SizedBox(width: 12),
+                      _buildActionChip(context, Icons.settings, 'Choir Profile', () => context.push('/choir-profile')),
                     ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+            ] else if (PermissionChecker(membership).canPlanPrograms) ...[
+              // song_program_planner was previously unreachable for a
+              // permission-holding chorister: canPlanPrograms was checked
+              // correctly inside planner_screen.dart, but this whole section
+              // (the only entry point to /planner) was isManagement-only, so
+              // there was never a route in. Give the permission holder just
+              // the Programs chip — not the rest of the Management section,
+              // which stays leader/director-only.
+              Text(
+                'Your Tools',
+                style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 16),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    _buildActionChip(context, Icons.event_note, 'Programs', () => context.push('/planner')),
                   ],
                 ),
               ),

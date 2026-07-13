@@ -160,7 +160,18 @@ describe("choir_memberships create — self-elevation (Fix 1)", () => {
     );
   });
 
-  it("an existing leader CAN promote a chorister to director via UPDATE (legitimate promotion flow preserved)", async () => {
+  // SECURITY FIX (Leader/Director audit, Finding #3): confirmed live via the
+  // emulator that this "legitimate promotion flow" was actually exploitable
+  // by ANY director, not just the Leader, with no restriction on which
+  // fields changed — a director could update their OWN doc to role:
+  // 'leader', or grant a different member's doc arbitrary permissions/role.
+  // `role` is now immutable through this client-facing rule entirely; every
+  // real role transition goes through the create rule or an Admin SDK Cloud
+  // Function (see functions/src/index.ts). This test now asserts the
+  // closed hole directly; the real replacement flow is covered by the
+  // "onRehearsalSessionDirectorChanged" test in the Director Session
+  // Scoping suite below.
+  it("even the LEADER CANNOT change a member's role via client UPDATE anymore (role changes only via Cloud Functions)", async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const db = ctx.firestore();
       await db.collection("choir_memberships").doc("choirA_leader1").set({
@@ -182,10 +193,75 @@ describe("choir_memberships create — self-elevation (Fix 1)", () => {
     });
     const leader1 = testEnv.authenticatedContext("leader1");
     const db = leader1.firestore();
-    await assertSucceeds(
+    await assertFails(
       db.collection("choir_memberships").doc("choirA_frank").update({
         role: "director",
       })
+    );
+  });
+
+  it("the LEADER CAN still grant/revoke another member's granular permissions and change their default voice part", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await db.collection("choir_memberships").doc("choirA_leader2").set({
+        choirId: "choirA", userId: "leader2", role: "leader",
+        defaultVoicePart: "S", permissions: [], joinedAt: new Date(),
+      });
+      await db.collection("choir_memberships").doc("choirA_gina").set({
+        choirId: "choirA", userId: "gina", role: "chorister",
+        defaultVoicePart: "T", permissions: [], joinedAt: new Date(),
+      });
+    });
+    const leader2 = testEnv.authenticatedContext("leader2");
+    const db = leader2.firestore();
+    await assertSucceeds(
+      db.collection("choir_memberships").doc("choirA_gina").update({
+        permissions: ["attendance_manager"],
+      })
+    );
+    await assertSucceeds(
+      db.collection("choir_memberships").doc("choirA_gina").update({
+        defaultVoicePart: "B",
+      })
+    );
+  });
+
+  it("a DIRECTOR (not the Leader) CANNOT self-escalate to leader, or grant another member's permissions/role (closes the live-confirmed hole)", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await db.collection("choir_memberships").doc("choirA_dave").set({
+        choirId: "choirA", userId: "dave", role: "director",
+        defaultVoicePart: "S", permissions: [], joinedAt: new Date(),
+      });
+      await db.collection("choir_memberships").doc("choirA_hank").set({
+        choirId: "choirA", userId: "hank", role: "chorister",
+        defaultVoicePart: "T", permissions: [], joinedAt: new Date(),
+      });
+    });
+    const dave = testEnv.authenticatedContext("dave");
+    const db = dave.firestore();
+    await assertFails(
+      db.collection("choir_memberships").doc("choirA_dave").update({ role: "leader" })
+    );
+    await assertFails(
+      db.collection("choir_memberships").doc("choirA_hank").update({ permissions: ["announcements"] })
+    );
+    await assertFails(
+      db.collection("choir_memberships").doc("choirA_hank").update({ role: "leader" })
+    );
+  });
+
+  it("a director CANNOT tamper with their own directorPriorRole (would otherwise let them get 'restored' as leader on their own expiry)", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().collection("choir_memberships").doc("choirA_ivan").set({
+        choirId: "choirA", userId: "ivan", role: "director",
+        defaultVoicePart: "S", permissions: [], joinedAt: new Date(),
+        directorSessionId: "someSession", directorPriorRole: "chorister", directorPriorPermissions: [],
+      });
+    });
+    const db = testEnv.authenticatedContext("ivan").firestore();
+    await assertFails(
+      db.collection("choir_memberships").doc("choirA_ivan").update({ directorPriorRole: "leader" })
     );
   });
 
@@ -315,11 +391,15 @@ describe("storage.rules choir-scoping (Fix 3)", () => {
     );
   });
 
-  it("Phase 2b Fix 3: a chorister with 'score_librarian' permission CANNOT write to /scores (delegation removed)", async () => {
+  // FUNCTIONAL FIX (Leader/Director audit, Finding #5): score_attachments
+  // now has a matching Firestore rule with the same role-or-permission
+  // shape as canUploadAudio, so this delegation is no longer the odd one
+  // out — flipped from the Phase 2b "delegation removed" assertion.
+  it("a chorister with 'score_librarian' permission CAN now write to /scores (delegation added — Finding #5)", async () => {
     await seedMembership("choirD", "librarian1", "chorister", ["score_librarian"]);
     const chorister = testEnv.authenticatedContext("librarian1");
     const storage = chorister.storage();
-    await assertFails(
+    await assertSucceeds(
       storage.ref("scores/choirD/song1/lead.pdf").putString("fake-pdf-bytes")
     );
   });
@@ -495,4 +575,380 @@ describe("Phase 4 Fix 3: concurrent song-create transactions against the REAL em
     }
     console.log(`  ✔ ${label}`);
   }
+});
+
+// Leader/Director audit (Findings #1, #2, #4): director access must be
+// scoped to directorSessionId, not choir-wide, and expiry must actually
+// revoke it server-side. joinAsGuestDirector/onRehearsalSessionDirectorChanged
+// /checkGuestTokenExpiry live in functions/src/index.ts (Admin SDK, bypasses
+// these rules) — these tests exercise the rules layer directly by seeding
+// the exact document shape those functions produce, the same way the rest
+// of this suite already does for other server-driven flows.
+describe("Director session scoping (Leader/Director audit Findings #1, #2)", () => {
+  async function seedSessionDirector(choirId, sessionId, uid, opts = {}) {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await db.collection("choirs").doc(choirId).set({
+        choirId, name: "Scoped Choir", churchName: "Test", leaderId: `${uid}_leader`,
+        inviteCode: `INV_${choirId}`, plan: "free", songCount: 0, createdAt: new Date(),
+      });
+      await db.collection("rehearsal_sessions").doc(sessionId).set({
+        sessionId, choirId, date: new Date(), time: "10:00", location: "",
+        directorId: uid, isGuestDirector: !!opts.isGuest, notes: null,
+      });
+      await db.collection("choir_memberships").doc(`${choirId}_${uid}`).set({
+        choirId, userId: uid, role: "director", defaultVoicePart: "S",
+        permissions: [], joinedAt: new Date(),
+        directorSessionId: sessionId,
+        directorPriorRole: "chorister",
+        directorPriorPermissions: [],
+      });
+    });
+  }
+
+  it("a session-scoped director CAN update their OWN assigned session", async () => {
+    await seedSessionDirector("scopeChoirA", "scopeSessionA", "dirA");
+    const db = testEnv.authenticatedContext("dirA").firestore();
+    await assertSucceeds(
+      db.collection("rehearsal_sessions").doc("scopeSessionA").update({ notes: "updated" })
+    );
+  });
+
+  it("a session-scoped director CANNOT update a DIFFERENT session in the same choir (closes the live-confirmed choir-wide leak)", async () => {
+    await seedSessionDirector("scopeChoirB", "scopeSessionB1", "dirB");
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().collection("rehearsal_sessions").doc("scopeSessionB2").set({
+        sessionId: "scopeSessionB2", choirId: "scopeChoirB", date: new Date(),
+        time: "10:00", location: "", directorId: "someoneElse", isGuestDirector: false, notes: null,
+      });
+    });
+    const db = testEnv.authenticatedContext("dirB").firestore();
+    await assertFails(
+      db.collection("rehearsal_sessions").doc("scopeSessionB2").update({ notes: "hijacked" })
+    );
+  });
+
+  it("a director CANNOT create a brand new rehearsal session (Leader-only)", async () => {
+    await seedSessionDirector("scopeChoirC", "scopeSessionC", "dirC");
+    const db = testEnv.authenticatedContext("dirC").firestore();
+    await assertFails(
+      db.collection("rehearsal_sessions").doc("scopeSessionCNew").set({
+        sessionId: "scopeSessionCNew", choirId: "scopeChoirC", date: new Date(),
+        time: "10:00", location: "", directorId: "dirC", isGuestDirector: false, notes: null,
+      })
+    );
+  });
+
+  it("a session-scoped director CAN mark attendance for their OWN session", async () => {
+    await seedSessionDirector("scopeChoirD", "scopeSessionD", "dirD");
+    const db = testEnv.authenticatedContext("dirD").firestore();
+    await assertSucceeds(
+      db.collection("attendance").doc("scopeSessionD_someMember").set({
+        sessionId: "scopeSessionD", userId: "someMember", choirId: "scopeChoirD", attended: true,
+      })
+    );
+  });
+
+  it("a session-scoped director CANNOT mark attendance for a DIFFERENT session (closes the live-confirmed choir-wide leak)", async () => {
+    await seedSessionDirector("scopeChoirE", "scopeSessionE1", "dirE");
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().collection("rehearsal_sessions").doc("scopeSessionE2").set({
+        sessionId: "scopeSessionE2", choirId: "scopeChoirE", date: new Date(),
+        time: "10:00", location: "", directorId: "someoneElse", isGuestDirector: false, notes: null,
+      });
+    });
+    const db = testEnv.authenticatedContext("dirE").firestore();
+    await assertFails(
+      db.collection("attendance").doc("scopeSessionE2_someMember").set({
+        sessionId: "scopeSessionE2", userId: "someMember", choirId: "scopeChoirE", attended: true,
+      })
+    );
+  });
+
+  it("a director (incl. guest) CANNOT edit the choir profile (closes the live-confirmed admin-settings leak)", async () => {
+    await seedSessionDirector("scopeChoirF", "scopeSessionF", "dirF", { isGuest: true });
+    const db = testEnv.authenticatedContext("dirF").firestore();
+    await assertFails(
+      db.collection("choirs").doc("scopeChoirF").update({ name: "Renamed by guest" })
+    );
+  });
+
+  it("a director's songCount increment (part of the song-upload transaction) still works despite the choirs-update lockdown", async () => {
+    await seedSessionDirector("scopeChoirG", "scopeSessionG", "dirG");
+    const db = testEnv.authenticatedContext("dirG").firestore();
+    await assertSucceeds(
+      db.collection("choirs").doc("scopeChoirG").update({ songCount: 1 })
+    );
+  });
+
+  it("after a simulated expiry (membership reverted to its prior role), the ex-director loses all director rights", async () => {
+    await seedSessionDirector("scopeChoirH", "scopeSessionH", "dirH");
+    // Simulates exactly what checkGuestTokenExpiry's revokeDirectorGrant
+    // does: restore directorPriorRole/directorPriorPermissions and clear
+    // the director-grant bookkeeping fields (a full overwrite here rather
+    // than FieldValue.delete() sentinels, but the same end state: those
+    // fields are simply absent afterward).
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().collection("choir_memberships").doc("scopeChoirH_dirH").set({
+        choirId: "scopeChoirH", userId: "dirH", role: "chorister",
+        defaultVoicePart: "S", permissions: [], joinedAt: new Date(),
+      });
+    });
+    const db = testEnv.authenticatedContext("dirH").firestore();
+    await assertFails(
+      db.collection("attendance").doc("scopeSessionH_someMember").set({
+        sessionId: "scopeSessionH", userId: "someMember", choirId: "scopeChoirH", attended: true,
+      })
+    );
+    await assertFails(
+      db.collection("rehearsal_sessions").doc("scopeSessionH").update({ notes: "should fail now" })
+    );
+  });
+});
+
+// Leader/Director audit (Finding #4): assigning an existing member as a
+// rehearsal's director via rehearsals_screen.dart's picker used to only set
+// a cosmetic directorId field, granting zero actual capability. This
+// exercises the REAL onRehearsalSessionDirectorChanged Firestore trigger
+// (functions/src/index.ts), not just the rules layer, since the trigger is
+// what's supposed to turn that assignment into a real grant.
+describe("onRehearsalSessionDirectorChanged trigger (Leader/Director audit Finding #4)", () => {
+  // The emulator's Firestore-trigger dispatch is noticeably slower than the
+  // writes themselves (observed several seconds of latency, well past a
+  // typical assertSucceeds/assertFails round trip) — this polls generously
+  // rather than assuming near-instant delivery. Reads via `readerUid`'s own
+  // authenticated context (a tenant member of the choir, so the
+  // choir_memberships read rule's isTenantMember branch already allows
+  // reading any membership in that choir) rather than
+  // withSecurityRulesDisabled, whose callback return value isn't the
+  // resolved snapshot in this SDK version.
+  async function waitForMembership(choirId, uid, readerUid, predicate, attempts = 120) {
+    const readerDb = testEnv.authenticatedContext(readerUid).firestore();
+    for (let i = 0; i < attempts; i++) {
+      const snap = await readerDb.collection("choir_memberships").doc(`${choirId}_${uid}`).get();
+      if (snap.exists && predicate(snap.data())) return snap.data();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error(`Timed out waiting for choir_memberships/${choirId}_${uid} to match predicate`);
+  }
+
+  it("a Leader assigning an existing chorister as a session's director actually grants them director capability", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await db.collection("choirs").doc("triggerChoirA").set({
+        choirId: "triggerChoirA", name: "Trigger Choir", churchName: "Test",
+        leaderId: "triggerLeaderA", inviteCode: "TRGA01", plan: "free", songCount: 0, createdAt: new Date(),
+      });
+      await db.collection("choir_memberships").doc("triggerChoirA_triggerLeaderA").set({
+        choirId: "triggerChoirA", userId: "triggerLeaderA", role: "leader",
+        defaultVoicePart: "S", permissions: [], joinedAt: new Date(),
+      });
+      await db.collection("choir_memberships").doc("triggerChoirA_assignee1").set({
+        choirId: "triggerChoirA", userId: "assignee1", role: "chorister",
+        defaultVoicePart: "T", permissions: [], joinedAt: new Date(),
+      });
+    });
+
+    const leaderDb = testEnv.authenticatedContext("triggerLeaderA").firestore();
+    await assertSucceeds(
+      leaderDb.collection("rehearsal_sessions").doc("triggerSessionA").set({
+        sessionId: "triggerSessionA", choirId: "triggerChoirA", date: new Date(),
+        time: "10:00", location: "", directorId: "assignee1", isGuestDirector: false, notes: null,
+      })
+    );
+
+    const granted = await waitForMembership("triggerChoirA", "assignee1", "triggerLeaderA",
+      (data) => data.role === "director" && data.directorSessionId === "triggerSessionA");
+    check("assignee1 was granted role: director scoped to triggerSessionA", true, granted);
+
+    // The grant should now actually work through the rules, not just exist
+    // as data — confirms the trigger's grant is functionally equivalent to
+    // the guest-link path.
+    const assigneeDb = testEnv.authenticatedContext("assignee1").firestore();
+    await assertSucceeds(
+      assigneeDb.collection("attendance").doc("triggerSessionA_someMember").set({
+        sessionId: "triggerSessionA", userId: "someMember", choirId: "triggerChoirA", attended: true,
+      })
+    );
+  });
+
+  it("reassigning a session's director before it starts revokes the PREVIOUS assignee's access to that session", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await db.collection("choirs").doc("triggerChoirB").set({
+        choirId: "triggerChoirB", name: "Trigger Choir B", churchName: "Test",
+        leaderId: "triggerLeaderB", inviteCode: "TRGB01", plan: "free", songCount: 0, createdAt: new Date(),
+      });
+      await db.collection("choir_memberships").doc("triggerChoirB_triggerLeaderB").set({
+        choirId: "triggerChoirB", userId: "triggerLeaderB", role: "leader",
+        defaultVoicePart: "S", permissions: [], joinedAt: new Date(),
+      });
+      await db.collection("choir_memberships").doc("triggerChoirB_first1").set({
+        choirId: "triggerChoirB", userId: "first1", role: "chorister",
+        defaultVoicePart: "T", permissions: [], joinedAt: new Date(),
+      });
+      await db.collection("choir_memberships").doc("triggerChoirB_second1").set({
+        choirId: "triggerChoirB", userId: "second1", role: "chorister",
+        defaultVoicePart: "B", permissions: [], joinedAt: new Date(),
+      });
+    });
+
+    const leaderDb = testEnv.authenticatedContext("triggerLeaderB").firestore();
+    await assertSucceeds(
+      leaderDb.collection("rehearsal_sessions").doc("triggerSessionB").set({
+        sessionId: "triggerSessionB", choirId: "triggerChoirB", date: new Date(),
+        time: "10:00", location: "", directorId: "first1", isGuestDirector: false, notes: null,
+      })
+    );
+    await waitForMembership("triggerChoirB", "first1", "triggerLeaderB", (data) => data.role === "director");
+
+    await assertSucceeds(
+      leaderDb.collection("rehearsal_sessions").doc("triggerSessionB").update({ directorId: "second1" })
+    );
+    await waitForMembership("triggerChoirB", "second1", "triggerLeaderB", (data) => data.role === "director");
+    const reverted = await waitForMembership("triggerChoirB", "first1", "triggerLeaderB", (data) => data.role === "chorister");
+    check("first1 was reverted back to chorister after being replaced", true, reverted);
+
+    const firstDb = testEnv.authenticatedContext("first1").firestore();
+    await assertFails(
+      firstDb.collection("attendance").doc("triggerSessionB_someMember").set({
+        sessionId: "triggerSessionB", userId: "someMember", choirId: "triggerChoirB", attended: true,
+      })
+    );
+  });
+
+  function check(label, cond, extra) {
+    if (!cond) {
+      throw new Error(`FAILED: ${label} -- ${JSON.stringify(extra)}`);
+    }
+    console.log(`  ✔ ${label}`);
+  }
+});
+
+// Leader/Director audit (Finding #5): score_attachments had no Firestore
+// rule at all — confirmed live that even the Leader was denied.
+describe("score_attachments (Leader/Director audit Finding #5)", () => {
+  it("even the LEADER can now create a score_attachments doc", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().collection("choirs").doc("scoreChoirA").set({
+        choirId: "scoreChoirA", name: "Score Choir", churchName: "Test",
+        leaderId: "scoreLeaderA", inviteCode: "SCA123", plan: "free", songCount: 0, createdAt: new Date(),
+      });
+      await ctx.firestore().collection("choir_memberships").doc("scoreChoirA_scoreLeaderA").set({
+        choirId: "scoreChoirA", userId: "scoreLeaderA", role: "leader",
+        defaultVoicePart: "S", permissions: [], joinedAt: new Date(),
+      });
+    });
+    const db = testEnv.authenticatedContext("scoreLeaderA").firestore();
+    await assertSucceeds(
+      db.collection("score_attachments").doc("scoreX").set({
+        scoreId: "scoreX", songId: "songX", choirId: "scoreChoirA",
+        type: "pdf", fileUrl: "https://example.com/x.pdf", label: "Full Score",
+        uploadedBy: "scoreLeaderA", createdAt: new Date(),
+      })
+    );
+  });
+
+  it("a chorister with 'score_librarian' CAN create a score_attachments doc; a plain chorister CANNOT", async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().collection("choir_memberships").doc("scoreChoirB_librarian2").set({
+        choirId: "scoreChoirB", userId: "librarian2", role: "chorister",
+        defaultVoicePart: "S", permissions: ["score_librarian"], joinedAt: new Date(),
+      });
+      await ctx.firestore().collection("choir_memberships").doc("scoreChoirB_plain2").set({
+        choirId: "scoreChoirB", userId: "plain2", role: "chorister",
+        defaultVoicePart: "S", permissions: [], joinedAt: new Date(),
+      });
+    });
+    const librarianDb = testEnv.authenticatedContext("librarian2").firestore();
+    await assertSucceeds(
+      librarianDb.collection("score_attachments").doc("scoreY").set({
+        scoreId: "scoreY", songId: "songY", choirId: "scoreChoirB",
+        type: "pdf", fileUrl: "https://example.com/y.pdf", label: "Alto Part",
+        uploadedBy: "librarian2", createdAt: new Date(),
+      })
+    );
+    const plainDb = testEnv.authenticatedContext("plain2").firestore();
+    await assertFails(
+      plainDb.collection("score_attachments").doc("scoreZ").set({
+        scoreId: "scoreZ", songId: "songZ", choirId: "scoreChoirB",
+        type: "pdf", fileUrl: "https://example.com/z.pdf", label: "Bass Part",
+        uploadedBy: "plain2", createdAt: new Date(),
+      })
+    );
+  });
+});
+
+// Leader/Director audit (Findings #6, #7): the 'announcements' permission
+// had no server-side effect anywhere, and pinning someone else's message
+// unconditionally failed.
+describe("chat_messages announcements permission (Leader/Director audit Findings #6, #7)", () => {
+  async function seedChatMember(choirId, uid, role, permissions = []) {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().collection("choir_memberships").doc(`${choirId}_${uid}`).set({
+        choirId, userId: uid, role, defaultVoicePart: "S", permissions, joinedAt: new Date(),
+      });
+    });
+  }
+
+  it("a chorister with 'announcements' CAN now set targetVoicePart (Finding #6)", async () => {
+    await seedChatMember("chatChoirA", "announcer1", "chorister", ["announcements"]);
+    const db = testEnv.authenticatedContext("announcer1").firestore();
+    await assertSucceeds(
+      db.collection("chat_messages").doc("chatMsgA").set({
+        choirId: "chatChoirA", senderId: "announcer1", type: "text",
+        content: "Targeted", targetVoicePart: "S", pinned: false, timestamp: new Date(),
+      })
+    );
+  });
+
+  it("a plain chorister still CANNOT set targetVoicePart", async () => {
+    await seedChatMember("chatChoirA", "plainMember1", "chorister");
+    const db = testEnv.authenticatedContext("plainMember1").firestore();
+    await assertFails(
+      db.collection("chat_messages").doc("chatMsgB").set({
+        choirId: "chatChoirA", senderId: "plainMember1", type: "text",
+        content: "Targeted", targetVoicePart: "S", pinned: false, timestamp: new Date(),
+      })
+    );
+  });
+
+  it("a Leader CAN pin a DIFFERENT member's message (Finding #7), but cannot piggyback other field changes onto that same update", async () => {
+    await seedChatMember("chatChoirB", "leaderX", "leader");
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().collection("choir_memberships").doc("chatChoirB_otherSender").set({
+        choirId: "chatChoirB", userId: "otherSender", role: "chorister",
+        defaultVoicePart: "S", permissions: [], joinedAt: new Date(),
+      });
+      await ctx.firestore().collection("chat_messages").doc("chatMsgC").set({
+        choirId: "chatChoirB", senderId: "otherSender", type: "text",
+        content: "Hello choir", pinned: false, timestamp: new Date(),
+      });
+    });
+    const db = testEnv.authenticatedContext("leaderX").firestore();
+    await assertSucceeds(
+      db.collection("chat_messages").doc("chatMsgC").update({ pinned: true })
+    );
+    await assertFails(
+      db.collection("chat_messages").doc("chatMsgC").update({ pinned: false, content: "tampered" })
+    );
+  });
+
+  it("a plain chorister still CANNOT pin someone else's message", async () => {
+    await seedChatMember("chatChoirB", "plainMember2", "chorister");
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().collection("choir_memberships").doc("chatChoirB_otherSender2").set({
+        choirId: "chatChoirB", userId: "otherSender2", role: "chorister",
+        defaultVoicePart: "S", permissions: [], joinedAt: new Date(),
+      });
+      await ctx.firestore().collection("chat_messages").doc("chatMsgD").set({
+        choirId: "chatChoirB", senderId: "otherSender2", type: "text",
+        content: "Hello choir", pinned: false, timestamp: new Date(),
+      });
+    });
+    const db = testEnv.authenticatedContext("plainMember2").firestore();
+    await assertFails(
+      db.collection("chat_messages").doc("chatMsgD").update({ pinned: true })
+    );
+  });
 });

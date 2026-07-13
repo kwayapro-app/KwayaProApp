@@ -8,8 +8,13 @@ final scoreRepositoryProvider = Provider<ScoreRepository>((ref) {
 
 // Phase 5 Fix 4: previously not autoDispose — see song_providers.dart for
 // the same fix and reasoning.
-final songScoresProvider = StreamProvider.autoDispose.family<List<ScoreAttachment>, String>((ref, songId) {
-  final sub = ref.watch(scoreRepositoryProvider).watchScores(songId);
+//
+// Family key is (songId, choirId): watchScores needs both to build a query
+// firestore.rules can actually authorize — see the comment on
+// ScoreRepository.watchScores.
+final songScoresProvider = StreamProvider.autoDispose
+    .family<List<ScoreAttachment>, ({String songId, String choirId})>((ref, params) {
+  final sub = ref.watch(scoreRepositoryProvider).watchScores(params.songId, params.choirId);
   ref.onDispose(() => sub.drain());
   return sub;
 });

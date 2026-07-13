@@ -24,8 +24,10 @@ class _RehearsalsScreenState extends ConsumerState<RehearsalsScreen> {
     final upcomingAsync = ref.watch(upcomingRehearsalsProvider);
     final pastAsync = ref.watch(pastRehearsalsProvider);
     final membership = ref.watch(currentMembershipProvider).valueOrNull;
-    
-    final isManagement = PermissionChecker(membership).isManagement;
+
+    final permissionChecker = PermissionChecker(membership);
+    final isManagement = permissionChecker.isManagement;
+    final canMarkAttendance = permissionChecker.canMarkAttendance;
 
     return Scaffold(
       body: SafeArea(
@@ -76,6 +78,7 @@ class _RehearsalsScreenState extends ConsumerState<RehearsalsScreen> {
                           session: session,
                           isNext: index == 0,
                           isManagement: isManagement,
+                          canMarkAttendance: canMarkAttendance,
                           onAttendanceTap: () => context.push('/attendance/${session.sessionId}'),
                           onGuestDirectorTap: () => context.push('/guest-director/${session.sessionId}'),
                         );
@@ -100,6 +103,7 @@ class _RehearsalsScreenState extends ConsumerState<RehearsalsScreen> {
                                 session: session,
                                 isNext: false,
                                 isManagement: false,
+                                canMarkAttendance: false,
                                 isPast: true,
                                 onAttendanceTap: null,
                                 onGuestDirectorTap: null,
@@ -183,6 +187,7 @@ class _RehearsalCard extends ConsumerWidget {
   final RehearsalSession session;
   final bool isNext;
   final bool isManagement;
+  final bool canMarkAttendance;
   final bool isPast;
   final VoidCallback? onAttendanceTap;
   final VoidCallback? onGuestDirectorTap;
@@ -191,6 +196,7 @@ class _RehearsalCard extends ConsumerWidget {
     required this.session,
     required this.isNext,
     required this.isManagement,
+    required this.canMarkAttendance,
     this.isPast = false,
     this.onAttendanceTap,
     this.onGuestDirectorTap,
@@ -267,8 +273,8 @@ class _RehearsalCard extends ConsumerWidget {
                     ],
                   ),
                   
-                  // Management actions (only for next upcoming)
-                  if (isManagement && isNext && !isPast) ...[
+                  // Management/attendance-permission actions (only for next upcoming)
+                  if ((isManagement || canMarkAttendance) && isNext && !isPast) ...[
                     const SizedBox(height: 16),
                     Row(
                       children: [
@@ -279,14 +285,19 @@ class _RehearsalCard extends ConsumerWidget {
                             label: const Text('Attendance'),
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: onGuestDirectorTap,
-                            icon: const Icon(Icons.person_add_outlined, size: 18),
-                            label: const Text('Guest'),
+                        // Guest-director invites remain leader/director-only —
+                        // attendance_manager is scoped to attendance, not to
+                        // granting temporary director access.
+                        if (isManagement) ...[
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: onGuestDirectorTap,
+                              icon: const Icon(Icons.person_add_outlined, size: 18),
+                              label: const Text('Guest'),
+                            ),
                           ),
-                        ),
+                        ],
                       ],
                     ),
                   ],

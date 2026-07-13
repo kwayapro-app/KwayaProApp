@@ -12,6 +12,7 @@ import '../../features/choir/presentation/members_screen.dart';
 import '../../features/auth/domain/auth_providers.dart';
 import '../../features/choir/domain/choir_providers.dart';
 import '../../features/choir/presentation/member_detail_screen.dart';
+import '../../features/choir/presentation/choir_profile_screen.dart';
 import '../../features/choir/data/choir_repository.dart';
 import '../../features/songs/presentation/library_screen.dart';
 import '../../features/rehearsal/presentation/rehearsals_screen.dart';
@@ -146,6 +147,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/billing',
         builder: (context, state) => const BillingScreen(),
+      ),
+      GoRoute(
+        path: '/choir-profile',
+        builder: (context, state) => const ChoirProfileScreen(),
       ),
       GoRoute(
         path: '/attendance/:sessionId',

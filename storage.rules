@@ -29,13 +29,14 @@ service firebase.storage {
         (isChoirMember(choirId) && 'audio_uploader' in membership(choirId).permissions);
     }
 
-    // Phase 2b decision: unlike /audio, /scores write access is leader/
-    // director ONLY — no 'score_librarian' delegation, even though
-    // PermissionChecker.canManageScores supports it client-side. See
-    // PHASE_2B_REPORT.md Fix 3 for why (no existing Firestore precedent to
-    // mirror, and no UI currently exercises the delegated path).
+    // FUNCTIONAL FIX (Leader/Director audit, Finding #5): firestore.rules now
+    // has a matching score_attachments collection with the same
+    // role-or-permission shape (see firestore.rules canManageScores) — the
+    // precedent PHASE_2B_REPORT.md's Fix 3 said was missing now exists, so
+    // this mirrors it instead of staying leader/director-only.
     function canManageScores(choirId) {
-      return isChoirManagement(choirId);
+      return isChoirManagement(choirId) ||
+        (isChoirMember(choirId) && 'score_librarian' in membership(choirId).permissions);
     }
 
     // User avatars — own only

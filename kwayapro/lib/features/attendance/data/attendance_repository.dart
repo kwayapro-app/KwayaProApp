@@ -73,13 +73,22 @@ class AttendanceRepository {
     });
   }
 
-  Future<void> batchMarkRSVPAttended(String sessionId) async {
+  // Leader/Director audit follow-up fix: this query filtered by sessionId +
+  // rsvp only, with no choirId filter. Firestore's `list` rule validator
+  // requires every resource.data field referenced by the rule
+  // (isTenantMember(resource.data.choirId)) to also be constrained by the
+  // query itself — confirmed live via a reproduction against the real
+  // firestore.rules: "Property choirId is undefined on object. for 'list'".
+  // Adding the choirId filter (same pattern as watchSessionAttendance above)
+  // resolves it.
+  Future<void> batchMarkRSVPAttended(String sessionId, String choirId) async {
     final connectivityResult = await Connectivity().checkConnectivity();
     if (connectivityResult.contains(ConnectivityResult.none)) return;
 
     final snapshot = await _db
         .collection('attendance')
         .where('sessionId', isEqualTo: sessionId)
+        .where('choirId', isEqualTo: choirId)
         .where('rsvp', isEqualTo: 'coming')
         .get();
 
@@ -157,6 +166,7 @@ class AttendanceRepository {
     final attendanceSnapshot = await _db
         .collection('attendance')
         .where('sessionId', isEqualTo: lastSessionId)
+        .where('choirId', isEqualTo: choirId)
         .get();
 
     if (attendanceSnapshot.docs.isEmpty) return 0.0;

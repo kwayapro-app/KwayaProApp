@@ -50,6 +50,30 @@
       ]
     },
     {
+      "collectionGroup": "rehearsal_sessions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "isGuestDirector", "order": "ASCENDING" },
+        { "fieldPath": "guestTokenExpiry", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "choir_memberships",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "choirId", "order": "ASCENDING" },
+        { "fieldPath": "directorSessionId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "rehearsal_sessions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "directorAccessRevoked", "order": "ASCENDING" },
+        { "fieldPath": "directorAccessExpiry", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "songs",
       "queryScope": "COLLECTION",
       "fields": [
@@ -63,6 +87,15 @@
       "fields": [
         { "fieldPath": "songId", "order": "ASCENDING" },
         { "fieldPath": "choirId", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "score_attachments",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "choirId", "order": "ASCENDING" },
+        { "fieldPath": "songId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
       ]
     }
   ],

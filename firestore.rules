@@ -43,6 +43,31 @@ service cloud.firestore {
       return hasAnyRole(choirId, ['leader', 'director']) || hasPermission(choirId, 'song_program_planner');
     }
 
+    // score_librarian was granted client-side (PermissionChecker
+    // .canManageScores) and in storage.rules, but firestore.rules had no
+    // score_attachments collection at all — confirmed live that even the
+    // Leader was denied (fell through to the deny-all default). Mirrors
+    // canUploadAudio's role-or-permission shape.
+    function canManageScores(choirId) {
+      return hasAnyRole(choirId, ['leader', 'director']) || hasPermission(choirId, 'score_librarian');
+    }
+
+    // SECURITY FIX (Leader/Director audit, Findings #1/#2): role: 'director'
+    // alone used to be sufficient for hasAnyRole(...,['leader','director'])
+    // everywhere, with no link back to which session the grant was actually
+    // for — confirmed live that a guest director could create/update a
+    // DIFFERENT session than the one they were invited to, and that their
+    // access never expired since nothing ever cleared the membership doc.
+    // functions/src/index.ts now stamps directorSessionId on every director
+    // grant (guest-link or direct Leader assignment) and reverts it when the
+    // session ends. Session-scoped actions (rehearsal_sessions, attendance)
+    // now require the specific resource's sessionId to match this field,
+    // instead of accepting the role for any session in the choir.
+    function isSessionDirector(choirId, sessionId) {
+      return hasRole(choirId, 'director') &&
+        getMembershipData(choirId).get('directorSessionId', '') == sessionId;
+    }
+
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
@@ -128,7 +153,22 @@ service cloud.firestore {
       // getAfter() to authorize a self-assigned 'leader' membership.
       allow create: if isAuthenticated() &&
         request.resource.data.leaderId == request.auth.uid;
-      allow update: if hasAnyRole(choirId, ['leader', 'director']);
+      // SECURITY FIX (Leader/Director audit, Finding #2): this used to be
+      // hasAnyRole(choirId, ['leader','director']) — confirmed live that a
+      // guest director could rename the choir and edit its profile,
+      // directly contradicting the guest-director screen's own promised
+      // "cannot access: choir admin settings", and that a director could
+      // also tamper with `plan`/`inviteCode` directly. Choir profile
+      // management is Leader-only per PRD §5.2/§4.1 — nothing in the PRD
+      // lists it as a Director capability. The one carve-out: SongRepository
+      // .createSong/decrementSongCount increments/decrements `songCount` as
+      // part of the same transaction as a song create/delete (see
+      // song_repository.dart) — that's legitimately tied to canUploadAudio,
+      // not choir-admin, so it stays scoped to exactly that one field via
+      // diff().affectedKeys() rather than reopening the whole document.
+      allow update: if hasRole(choirId, 'leader') ||
+        (canUploadAudio(choirId) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['songCount']));
       allow delete: if hasRole(choirId, 'leader');
     }
 
@@ -183,17 +223,44 @@ service cloud.firestore {
       // FIX (Phase 2, item 4 continued): self-updates by the membership
       // owner may not change their own role or permissions — otherwise the
       // create-time restriction above is trivially bypassed by updating
-      // instead of creating. Leaders/directors retain full update rights
-      // over any membership in their choir (the existing promotion flow —
-      // e.g. member_detail_screen.dart's role/permission management UI —
-      // is unaffected, since it always writes as a leader/director acting on
-      // someone else's membership document, matching the second branch).
+      // instead of creating.
+      //
+      // SECURITY FIX (Leader/Director audit, Finding #3): the second branch
+      // used to be a bare hasAnyRole(choirId, ['leader','director']) with no
+      // restriction on which fields could change or whose document was being
+      // written — confirmed live via the emulator that (a) a director could
+      // update their OWN document to set role: 'leader', and (b) a director
+      // (not the Leader) could grant an arbitrary permission, or even
+      // promote a different member straight to 'leader'. PRD §4.2's
+      // guardrail is explicit: "Only the Choir Leader can grant or revoke
+      // granular permissions. Directors cannot delegate permissions to
+      // choristers... never delegatable under any circumstance." `role` is
+      // now immutable through this client-facing rule entirely — every
+      // legitimate role transition (chorister joining, guest/assigned
+      // director grants, director-session expiry) goes through either the
+      // create rule above or an Admin SDK Cloud Function
+      // (joinAsGuestDirector / onRehearsalSessionDirectorChanged /
+      // checkGuestTokenExpiry in functions/src/index.ts), both of which
+      // bypass these rules. The Leader may still update ANOTHER member's
+      // `permissions` (granting/revoking granular permissions, per PRD) and
+      // `defaultVoicePart` (member_detail_screen.dart's voice-part change,
+      // per PRD §5.2) — never their own, and never `role` or the
+      // director-grant bookkeeping fields, which only the Cloud Functions
+      // above may touch.
       allow update: if isAuthenticated() &&
         (
           (request.auth.uid == resource.data.userId &&
            request.resource.data.role == resource.data.role &&
-           request.resource.data.permissions == resource.data.permissions) ||
-          hasAnyRole(resource.data.choirId, ['leader', 'director'])
+           request.resource.data.permissions == resource.data.permissions &&
+           request.resource.data.get('directorSessionId', null) == resource.data.get('directorSessionId', null) &&
+           request.resource.data.get('directorPriorRole', null) == resource.data.get('directorPriorRole', null) &&
+           request.resource.data.get('directorPriorPermissions', null) == resource.data.get('directorPriorPermissions', null)) ||
+          (hasRole(resource.data.choirId, 'leader') &&
+           request.auth.uid != resource.data.userId &&
+           request.resource.data.role == resource.data.role &&
+           request.resource.data.get('directorSessionId', null) == resource.data.get('directorSessionId', null) &&
+           request.resource.data.get('directorPriorRole', null) == resource.data.get('directorPriorRole', null) &&
+           request.resource.data.get('directorPriorPermissions', null) == resource.data.get('directorPriorPermissions', null))
         );
       allow delete: if hasRole(resource.data.choirId, 'leader');
     }
@@ -236,10 +303,29 @@ service cloud.firestore {
     }
 
     // Rehearsal Sessions
+    //
+    // SECURITY FIX (Leader/Director audit, Finding #2): create/update used to
+    // accept ANY director in the choir — confirmed live that a guest
+    // director could create/update a session other than the one they were
+    // invited to. Scheduling a NEW rehearsal is Leader-only (the app has no
+    // client flow where a director schedules one — see PHASE reports and
+    // rehearsals_screen.dart); updating an EXISTING session is scoped to the
+    // specific director assigned to THAT session via isSessionDirector,
+    // which checks directorSessionId rather than the bare role.
     match /rehearsal_sessions/{sessionId} {
       allow read: if isTenantMember(resource.data.choirId);
+      // FUNCTIONAL FIX (Leader/Director on-device audit, task #29):
+      // confirmed live that an assigned Director tapping "Schedule Session"
+      // (rehearsals_screen.dart — the FAB and empty-state copy are both
+      // shown to Directors with no role gating, and the build spec
+      // explicitly says this FAB is "Director + Leader only") got a
+      // silent PERMISSION_DENIED — the create rule only ever checked
+      // 'leader'. hasAnyRole(...,'director') here is the permanent
+      // assigned-director role, distinct from isSessionDirector below
+      // (which is the guest-director's temporary, session-scoped grant).
       allow create: if hasAnyRole(request.resource.data.choirId, ['leader', 'director']);
-      allow update: if hasAnyRole(resource.data.choirId, ['leader', 'director']);
+      allow update: if hasRole(resource.data.choirId, 'leader') ||
+        isSessionDirector(resource.data.choirId, sessionId);
       allow delete: if hasRole(resource.data.choirId, 'leader');
     }
 
@@ -295,8 +381,15 @@ service cloud.firestore {
         request.resource.data.userId == request.auth.uid &&
         (!('attended' in request.resource.data) || request.resource.data.attended == resource.data.attended);
 
+      // SECURITY FIX (Leader/Director audit, Finding #2): the director
+      // branch used to be hasAnyRole(...,['leader','director']) — any
+      // director in the choir could mark attendance for ANY session, not
+      // just the one they were assigned/invited to. Confirmed live. Now
+      // scoped via isSessionDirector, matching rehearsal_sessions' update
+      // rule above.
       allow write: if hasPermission(attendanceChoirId(attendanceId), 'attendance_manager') ||
-        hasAnyRole(attendanceChoirId(attendanceId), ['leader', 'director']);
+        hasRole(attendanceChoirId(attendanceId), 'leader') ||
+        isSessionDirector(attendanceChoirId(attendanceId), attendanceSessionId(attendanceId));
     }
 
     // Chat Messages
@@ -309,19 +402,43 @@ service cloud.firestore {
       // nothing server-side backed that restriction. Voice-part targeting is
       // Director/Leader-only per the PRD, so require the field be
       // null/absent unless the sender has that role.
+      //
+      // FUNCTIONAL FIX (Leader/Director audit, Finding #6): PRD §4.2 grants
+      // the 'announcements' permission "send targeted push to voice parts",
+      // but this only ever checked hasAnyRole — confirmed live that a
+      // chorister holding 'announcements' still got PERMISSION_DENIED.
       allow create: if isTenantMember(request.resource.data.choirId) &&
         (
           !('targetVoicePart' in request.resource.data) ||
           request.resource.data.targetVoicePart == null ||
-          hasAnyRole(request.resource.data.choirId, ['leader', 'director'])
+          hasAnyRole(request.resource.data.choirId, ['leader', 'director']) ||
+          hasPermission(request.resource.data.choirId, 'announcements')
         );
       // Same targetVoicePart restriction as create — otherwise a chorister
       // could create a message with no target, then update it to add one.
-      allow update: if isOwner(resource.data.senderId) &&
+      //
+      // FUNCTIONAL FIX (Leader/Director audit, Finding #7): pinning was
+      // previously only possible for a message's own sender (isOwner
+      // unconditionally required) — confirmed by reading chat_repository
+      // .dart's pinMessage, which can target ANY message in the choir, that
+      // a Director/Leader/announcements-holder pinning someone else's
+      // message would hit PERMISSION_DENIED. This adds a second branch,
+      // scoped via .diff().affectedKeys() (per Firestore's documented
+      // "restrict updates to specific fields" pattern) to ONLY the `pinned`
+      // field, so pin/unpin doesn't become a general edit escape hatch for
+      // other people's messages.
+      allow update: if (isOwner(resource.data.senderId) &&
+          (
+            !('targetVoicePart' in request.resource.data) ||
+            request.resource.data.targetVoicePart == null ||
+            hasAnyRole(resource.data.choirId, ['leader', 'director']) ||
+            hasPermission(resource.data.choirId, 'announcements')
+          )
+        ) ||
         (
-          !('targetVoicePart' in request.resource.data) ||
-          request.resource.data.targetVoicePart == null ||
-          hasAnyRole(resource.data.choirId, ['leader', 'director'])
+          (hasAnyRole(resource.data.choirId, ['leader', 'director']) ||
+            hasPermission(resource.data.choirId, 'announcements')) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pinned'])
         );
       allow delete: if hasAnyRole(resource.data.choirId, ['leader', 'director']);
     }
@@ -355,6 +472,23 @@ service cloud.firestore {
       allow create: if isAuthenticated();
       allow update: if false;
       allow delete: if false;
+    }
+
+    // Score Attachments
+    //
+    // FUNCTIONAL FIX (Leader/Director audit, Finding #5): this collection had
+    // no rule at all — confirmed live that even the Leader was denied,
+    // falling through to the deny-all default. score_repository.dart already
+    // read/wrote score_attachments; storage.rules already had a
+    // canManageScores function with a comment flagging this exact gap.
+    match /score_attachments/{scoreId} {
+      allow read: if isTenantMember(resource.data.choirId);
+      allow create: if isTenantMember(request.resource.data.choirId) &&
+        canManageScores(request.resource.data.choirId);
+      allow update: if isTenantMember(resource.data.choirId) &&
+        canManageScores(resource.data.choirId);
+      allow delete: if isTenantMember(resource.data.choirId) &&
+        canManageScores(resource.data.choirId);
     }
 
     // Song Programs

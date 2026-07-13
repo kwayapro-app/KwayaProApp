@@ -44,79 +44,92 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final membership = ref.watch(currentMembershipProvider).valueOrNull;
     final user = ref.watch(authStateProvider).valueOrNull;
 
-    final isDirectorOrLeader = PermissionChecker(membership).isManagement;
+    // FUNCTIONAL FIX (Leader/Director audit, Finding #6): this used to be
+    // isManagement only, so a chorister granted the 'announcements'
+    // permission (PRD §4.2: "send targeted push to voice parts") saw no
+    // pin/target controls at all despite firestore.rules (now) allowing it.
+    final isDirectorOrLeader = PermissionChecker(membership).canPostAnnouncements;
 
-    return Column(
-      children: [
-        pinnedAsync.when(
-          data: (pinned) => pinned != null
-              ? _PinnedBanner(message: pinned, onShare: () => _shareToWhatsApp(pinned))
-              : const SizedBox.shrink(),
-          loading: () => const SizedBox.shrink(),
-          error: (_, __) => const SizedBox.shrink(),
-        ),
-        Expanded(
-          child: messagesAsync.when(
-            data: (messages) {
-              if (messages.isEmpty) {
-                return Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.chat_bubble_outline, size: 64, color: Colors.grey[400]),
-                      const SizedBox(height: 16),
-                      Text('No messages yet', style: TextStyle(color: Colors.grey[600])),
-                      const SizedBox(height: 8),
-                      Text('Start the conversation!', style: TextStyle(color: Colors.grey[500], fontSize: 12)),
-                    ],
-                  ),
-                );
-              }
-
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (_scrollController.hasClients) {
-                  _scrollController.animateTo(
-                    _scrollController.position.maxScrollExtent,
-                    duration: const Duration(milliseconds: 300),
-                    curve: Curves.easeOut,
+    // Leader/Director audit follow-up fix: unlike every other tab screen
+    // (home_screen.dart etc.), ChatScreen had no SafeArea of its own — the
+    // outer shell Scaffold (navigation_shell_screen.dart) doesn't apply one
+    // either, so messages rendered flush under the status bar. bottom:false
+    // because _ChatInputBar already wraps itself in a SafeArea for the
+    // bottom inset; wrapping here too would double that padding.
+    return SafeArea(
+      bottom: false,
+      child: Column(
+        children: [
+          pinnedAsync.when(
+            data: (pinned) => pinned != null
+                ? _PinnedBanner(message: pinned, onShare: () => _shareToWhatsApp(pinned))
+                : const SizedBox.shrink(),
+            loading: () => const SizedBox.shrink(),
+            error: (_, __) => const SizedBox.shrink(),
+          ),
+          Expanded(
+            child: messagesAsync.when(
+              data: (messages) {
+                if (messages.isEmpty) {
+                  return Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.chat_bubble_outline, size: 64, color: Colors.grey[400]),
+                        const SizedBox(height: 16),
+                        Text('No messages yet', style: TextStyle(color: Colors.grey[600])),
+                        const SizedBox(height: 8),
+                        Text('Start the conversation!', style: TextStyle(color: Colors.grey[500], fontSize: 12)),
+                      ],
+                    ),
                   );
                 }
-              });
 
-              return ListView.builder(
-                controller: _scrollController,
-                padding: const EdgeInsets.all(16),
-                itemCount: messages.length,
-                itemBuilder: (context, index) {
-                  final message = messages[index];
-                  final isOwn = message.senderId == user?.uid;
-                  return ChatMessageBubble(
-                    message: message,
-                    isOwn: isOwn,
-                    isDirectorOrLeader: isDirectorOrLeader,
-                    onPin: () => _togglePin(message),
-                    onShare: () => _shareToWhatsApp(message),
-                  );
-                },
-              );
-            },
-            loading: () => const Center(child: CircularProgressIndicator()),
-            error: (e, _) => Center(child: Text('Error: $e')),
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (_scrollController.hasClients) {
+                    _scrollController.animateTo(
+                      _scrollController.position.maxScrollExtent,
+                      duration: const Duration(milliseconds: 300),
+                      curve: Curves.easeOut,
+                    );
+                  }
+                });
+
+                return ListView.builder(
+                  controller: _scrollController,
+                  padding: const EdgeInsets.all(16),
+                  itemCount: messages.length,
+                  itemBuilder: (context, index) {
+                    final message = messages[index];
+                    final isOwn = message.senderId == user?.uid;
+                    return ChatMessageBubble(
+                      message: message,
+                      isOwn: isOwn,
+                      isDirectorOrLeader: isDirectorOrLeader,
+                      onPin: () => _togglePin(message),
+                      onShare: () => _shareToWhatsApp(message),
+                    );
+                  },
+                );
+              },
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (e, _) => Center(child: Text('Error: $e')),
+            ),
           ),
-        ),
-        _ChatInputBar(
-          isRecording: isRecording,
-          targetPart: targetPart,
-          isDirectorOrLeader: isDirectorOrLeader,
-          onTargetChanged: (part) => ref.read(messageTargetProvider.notifier).state = part,
-          messageController: _messageController,
-          onSendText: () => _sendTextMessage(user?.uid ?? '', choirId ?? ''),
-          onStartRecording: _startRecording,
-          onStopRecording: () => _stopRecording(choirId ?? '', user?.uid ?? ''),
-          onCancelRecording: _cancelRecording,
-          recordingDuration: ref.watch(recordingDurationProvider),
-        ),
-      ],
+          _ChatInputBar(
+            isRecording: isRecording,
+            targetPart: targetPart,
+            isDirectorOrLeader: isDirectorOrLeader,
+            onTargetChanged: (part) => ref.read(messageTargetProvider.notifier).state = part,
+            messageController: _messageController,
+            onSendText: () => _sendTextMessage(user?.uid ?? '', choirId ?? ''),
+            onStartRecording: _startRecording,
+            onStopRecording: () => _stopRecording(choirId ?? '', user?.uid ?? ''),
+            onCancelRecording: _cancelRecording,
+            recordingDuration: ref.watch(recordingDurationProvider),
+          ),
+        ],
+      ),
     );
   }
 

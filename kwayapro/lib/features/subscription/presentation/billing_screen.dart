@@ -34,6 +34,8 @@ class _BillingScreenState extends ConsumerState<BillingScreen> {
     super.dispose();
   }
 
+  static const _stepTitles = ['Select Plan', 'Payment Method', 'Confirm', 'Processing'];
+
   @override
   Widget build(BuildContext context) {
     final subscriptionAsync = ref.watch(currentSubscriptionProvider);
@@ -43,82 +45,81 @@ class _BillingScreenState extends ConsumerState<BillingScreen> {
     final isOnPro = currentPlan == ChoirPlan.pro;
     final isDowngrade = selectedPlan == ChoirPlan.free && currentPlan == ChoirPlan.pro;
 
+    final Widget stepContent = switch (_currentStep) {
+      0 => _PlanSelectionStep(isOnPro: isOnPro, currentPlan: currentPlan),
+      1 => const _PaymentMethodStep(),
+      2 => const _ConfirmationStep(),
+      _ => _ProcessingStep(
+          isProcessing: _isProcessing,
+          isDowngrade: isDowngrade,
+          outcome: _paymentOutcome,
+          errorMessage: _paymentError,
+        ),
+    };
+
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
       appBar: AppBar(title: const Text('Billing'), centerTitle: true),
-      body: Stepper(
-        currentStep: _currentStep,
-        onStepContinue: _handleStepContinue,
-        onStepCancel: _handleStepCancel,
-        controlsBuilder: (context, details) {
-          return Padding(
-            padding: const EdgeInsets.only(top: 16),
-            child: Row(
-              children: [
-                if (_currentStep < 3)
-                  FilledButton(
-                    onPressed: details.onStepContinue,
-                    child: Text(_currentStep == 2 ? 'Pay Now' : 'Continue'),
-                  )
-                else if (_currentStep == 3 && _isProcessing)
-                  const FilledButton(
-                    onPressed: null,
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _stepTitles[_currentStep],
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 16),
+            stepContent,
+            Padding(
+              padding: const EdgeInsets.only(top: 24),
+              child: Row(
+                children: [
+                  if (_currentStep < 3)
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: _handleStepContinue,
+                        child: Text(_currentStep == 2 ? 'Pay Now' : 'Continue'),
+                      ),
+                    )
+                  else if (_isProcessing)
+                    const Expanded(
+                      child: FilledButton(
+                        onPressed: null,
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ),
+                    )
+                  else
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: _handleStepContinue,
+                        child: const Text('Done'),
+                      ),
                     ),
-                  )
-                else
-                  FilledButton(
-                    onPressed: details.onStepContinue,
-                    child: const Text('Done'),
-                  ),
-                if (_currentStep > 0) ...[
-                  const SizedBox(width: 12),
-                  TextButton(
-                    onPressed: details.onStepCancel,
-                    child: const Text('Back'),
-                  ),
+                  if (_currentStep > 0) ...[
+                    const SizedBox(width: 12),
+                    Material(
+                      color: Colors.transparent,
+                      shape: const StadiumBorder(),
+                      child: InkWell(
+                        customBorder: const StadiumBorder(),
+                        onTap: _handleStepCancel,
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                          child: Text('Back'),
+                        ),
+                      ),
+                    ),
+                  ],
                 ],
-              ],
+              ),
             ),
-          );
-        },
-        steps: [
-          Step(
-            title: const Text('Select Plan'),
-            content: _PlanSelectionStep(
-              isOnPro: isOnPro,
-              currentPlan: currentPlan,
-            ),
-            isActive: _currentStep >= 0,
-            state: _currentStep > 0 ? StepState.complete : StepState.indexed,
-          ),
-          Step(
-            title: const Text('Payment Method'),
-            content: const _PaymentMethodStep(),
-            isActive: _currentStep >= 1,
-            state: _currentStep > 1 ? StepState.complete : StepState.indexed,
-          ),
-          Step(
-            title: const Text('Confirm'),
-            content: const _ConfirmationStep(),
-            isActive: _currentStep >= 2,
-            state: _currentStep > 2 ? StepState.complete : StepState.indexed,
-          ),
-          Step(
-            title: const Text('Processing'),
-            content: _ProcessingStep(
-              isProcessing: _isProcessing,
-              isDowngrade: isDowngrade,
-              outcome: _paymentOutcome,
-              errorMessage: _paymentError,
-            ),
-            isActive: _currentStep >= 3,
-            state: _currentStep > 3 ? StepState.complete : StepState.indexed,
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

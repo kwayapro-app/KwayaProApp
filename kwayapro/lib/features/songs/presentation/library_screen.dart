@@ -11,9 +11,11 @@ import '../../../shared/utils/permission_checker.dart';
 import '../../auth/domain/auth_providers.dart';
 import '../data/song_repository.dart' show SongLimitExceededException;
 import '../domain/song_providers.dart';
+import '../domain/score_providers.dart';
 import '../domain/models/song.dart';
 import '../domain/models/song_section.dart';
 import '../domain/models/audio_part.dart';
+import '../domain/models/score_attachment.dart';
 import 'widgets/song_list_item.dart';
 
 class LibraryScreen extends ConsumerStatefulWidget {
@@ -200,11 +202,14 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                       userVoicePart: userVoicePart,
                       colorIndex: index,
                       onPartTap: (part) => _playPart(songWithParts, part),
-                      onMoreTap: (isManagement || PermissionChecker(membership).canUploadAudio)
+                      onMoreTap: (isManagement ||
+                              PermissionChecker(membership).canUploadAudio ||
+                              PermissionChecker(membership).canManageScores)
                           ? () => _showSongOptions(
                                 songWithParts,
                                 isManagement,
                                 PermissionChecker(membership).canUploadAudio,
+                                PermissionChecker(membership).canManageScores,
                               )
                           : null,
                     );
@@ -348,7 +353,12 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   // canUploadAudio (management role or the audio_uploader permission), so
   // this wasn't an actual data breach, just a dead-end UI exposing a control
   // that would silently fail for choristers. Gated to match the rule.
-  void _showSongOptions(SongWithParts songWithParts, bool isManagement, bool canUploadAudio) {
+  void _showSongOptions(
+    SongWithParts songWithParts,
+    bool isManagement,
+    bool canUploadAudio,
+    bool canManageScores,
+  ) {
     showModalBottomSheet(
       context: context,
       builder: (context) => SafeArea(
@@ -373,6 +383,15 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                 },
               ),
             ],
+            if (canManageScores)
+              ListTile(
+                leading: const Icon(Icons.picture_as_pdf_outlined),
+                title: const Text('Manage Scores'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showManageScoresSheet(songWithParts);
+                },
+              ),
             if (isManagement)
               ListTile(
                 leading: Icon(Icons.delete, color: Theme.of(context).colorScheme.error),
@@ -384,6 +403,18 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
               ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _showManageScoresSheet(SongWithParts songWithParts) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => _ManageScoresSheet(
+        songId: songWithParts.song.songId,
+        choirId: songWithParts.song.choirId,
+        songTitle: songWithParts.song.title,
       ),
     );
   }
@@ -787,6 +818,157 @@ class _VoicePartPickerSheet extends StatelessWidget {
             )),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// Score Librarian entry point: previously canManageScores had no UI consumer
+// anywhere in the app — granting the permission (or holding the leader/
+// director role) had no reachable effect. Mirrors the audio-upload sheet's
+// shape (file_picker -> repository upload) and score_repository.dart's
+// existing uploadScore/deleteScore/watchScores, which were already wired but
+// unused.
+class _ManageScoresSheet extends ConsumerStatefulWidget {
+  final String songId;
+  final String choirId;
+  final String songTitle;
+
+  const _ManageScoresSheet({
+    required this.songId,
+    required this.choirId,
+    required this.songTitle,
+  });
+
+  @override
+  ConsumerState<_ManageScoresSheet> createState() => _ManageScoresSheetState();
+}
+
+class _ManageScoresSheetState extends ConsumerState<_ManageScoresSheet> {
+  bool _isUploading = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scoresAsync = ref.watch(
+      songScoresProvider((songId: widget.songId, choirId: widget.choirId)),
+    );
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Scores — ${widget.songTitle}', style: theme.textTheme.titleLarge),
+            const SizedBox(height: 16),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: scoresAsync.when(
+                data: (scores) => scores.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        child: Text(
+                          'No scores uploaded yet.',
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      )
+                    : ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: scores.length,
+                        itemBuilder: (context, index) {
+                          final score = scores[index];
+                          return ListTile(
+                            leading: Icon(
+                              score.type == ScoreType.pdf ? Icons.picture_as_pdf : Icons.image,
+                            ),
+                            title: Text(score.label),
+                            trailing: IconButton(
+                              icon: Icon(Icons.delete_outline, color: theme.colorScheme.error),
+                              tooltip: 'Delete score',
+                              onPressed: () => _confirmDelete(score),
+                            ),
+                          );
+                        },
+                      ),
+                loading: () => const Center(child: CircularProgressIndicator()),
+                error: (e, _) => Text('Error: $e'),
+              ),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _isUploading ? null : _pickAndUpload,
+                icon: _isUploading
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.upload_file),
+                label: Text(_isUploading ? 'Uploading...' : 'Upload Score (PDF/Image)'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickAndUpload() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf', 'jpg', 'jpeg', 'png'],
+    );
+    if (result == null || result.files.isEmpty || result.files.first.path == null) return;
+    if (!mounted) return;
+
+    final file = result.files.first;
+    final extension = (file.extension ?? '').toLowerCase();
+    final type = extension == 'pdf' ? ScoreType.pdf : ScoreType.image;
+    final userId = ref.read(currentUserIdProvider);
+    if (userId == null) return;
+
+    setState(() => _isUploading = true);
+    final scaffold = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(scoreRepositoryProvider).uploadScore(
+            songId: widget.songId,
+            choirId: widget.choirId,
+            filePath: file.path!,
+            type: type,
+            label: file.name,
+            uploadedBy: userId,
+          );
+      if (mounted) scaffold.showSnackBar(const SnackBar(content: Text('Score uploaded')));
+    } catch (e) {
+      if (mounted) scaffold.showSnackBar(SnackBar(content: Text('Upload failed: $e')));
+    } finally {
+      if (mounted) setState(() => _isUploading = false);
+    }
+  }
+
+  void _confirmDelete(ScoreAttachment score) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Score?'),
+        content: Text('Remove "${score.label}"? This cannot be undone.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await ref.read(scoreRepositoryProvider).deleteScore(score.scoreId);
+            },
+            child: const Text('Delete'),
+          ),
+        ],
       ),
     );
   }

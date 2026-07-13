@@ -31,6 +31,8 @@ class ChoirRepository extends BaseRepository {
       'https://us-central1-kwayapro-app.cloudfunctions.net/lookupChoirByInviteCode';
   static const _checkInviteCodeFunctionUrl =
       'https://us-central1-kwayapro-app.cloudfunctions.net/checkInviteCodeAvailable';
+  static const _assignMemberRoleFunctionUrl =
+      'https://us-central1-kwayapro-app.cloudfunctions.net/assignMemberRole';
 
   Future<String> _requireIdToken() async {
     final user = FirebaseAuth.instance.currentUser;
@@ -151,7 +153,37 @@ class ChoirRepository extends BaseRepository {
   }
 
   Stream<Choir?> watchChoir(String choirId) {
-    return _choirsRef.doc(choirId).snapshots().map((snapshot) => snapshot.data());
+    return _watchDocWithRetry(_choirsRef.doc(choirId));
+  }
+
+  // FUNCTIONAL FIX (found while on-device-verifying the onboarding-crash fix,
+  // #5 above): a fresh choir/membership doc's very first .snapshots() listen
+  // can land in the narrow window before the write is visible to rules
+  // evaluation, so firestore.rules' `resource.data.userId` evaluates against
+  // a null resource and the whole query/get is denied — see
+  // firestore.rules' choir_memberships comment for the query-shape half of
+  // this same race, already fixed there. Unlike onboarding_screen.dart's
+  // one-shot dispose crash (fixed with a mounted guard), a permission-denied
+  // on a *stream* terminates the underlying Firestore listener for good —
+  // the SDK does not re-subscribe on its own — so without this retry the
+  // provider is stuck in AsyncError forever with no user-facing recovery
+  // path (confirmed on-device: home_screen.dart hung on an infinite spinner
+  // until the app was force-restarted). A short bounded retry lets rules
+  // propagation catch up before giving up and surfacing the real error.
+  Stream<T?> _watchDocWithRetry<T>(
+    DocumentReference<T> ref, {
+    int retriesLeft = 3,
+  }) async* {
+    try {
+      yield* ref.snapshots().map((snapshot) => snapshot.data());
+    } on FirebaseException catch (e) {
+      if (e.code == 'permission-denied' && retriesLeft > 0) {
+        await Future.delayed(const Duration(milliseconds: 700));
+        yield* _watchDocWithRetry(ref, retriesLeft: retriesLeft - 1);
+      } else {
+        rethrow;
+      }
+    }
   }
 
   // Membership methods
@@ -173,7 +205,7 @@ class ChoirRepository extends BaseRepository {
   // now correctly blocks for anyone but the profile's own owner anyway.
   Stream<ChoirMembership?> watchMembership(String choirId, String userId) {
     final docId = '${choirId}_$userId';
-    return _membershipsRef.doc(docId).snapshots().map((snapshot) => snapshot.data());
+    return _watchDocWithRetry(_membershipsRef.doc(docId));
   }
 
   Stream<List<ChoirMembership>> watchMembers(String choirId) {
@@ -196,6 +228,29 @@ class ChoirRepository extends BaseRepository {
   Future<void> deleteMembership(String choirId, String userId) async {
     final docId = '${choirId}_$userId';
     await _membershipsRef.doc(docId).delete();
+  }
+
+  // FUNCTIONAL FIX (Leader/Director on-device audit, task #29): role is
+  // deliberately immutable through firestore.rules' client-facing update
+  // rule (see Finding #3 comment there) — the previous rule change closed a
+  // self-escalation hole where a director could promote themselves or
+  // others to leader. Permanently assigning/revoking 'director' therefore
+  // has to go through this Cloud Function (Admin SDK), which independently
+  // verifies the caller holds 'leader' server-side and only allows
+  // chorister<->director transitions — never touches 'leader'.
+  Future<void> assignMemberRole(String choirId, String targetUserId, MemberRole role) async {
+    if (role != MemberRole.director && role != MemberRole.chorister) {
+      throw Exception('Only director/chorister role changes are supported.');
+    }
+    final idToken = await _requireIdToken();
+    final response = await http.post(
+      Uri.parse(_assignMemberRoleFunctionUrl),
+      headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
+      body: jsonEncode({'choirId': choirId, 'targetUserId': targetUserId, 'role': role.name}),
+    );
+    if (response.statusCode != 200) {
+      throw Exception(_serverErrorMessage(response, 'Could not change this member\'s role. Please try again.'));
+    }
   }
 
   // Alias for findByInviteCode (used by deep link join flow)

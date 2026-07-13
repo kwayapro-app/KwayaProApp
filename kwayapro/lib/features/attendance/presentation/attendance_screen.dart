@@ -39,8 +39,14 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                rehearsalAsync.valueOrNull
-                        ?.firstWhere((s) => s.sessionId == widget.sessionId, orElse: () => throw Exception()).title ??
+                // Leader/Director audit follow-up fix: firstWhere's orElse
+                // threw synchronously whenever rehearsalAsync hadn't (yet)
+                // refreshed to include this session — reproduced live via
+                // the equivalent bug in _VoicePartOverrideSheet below.
+                (rehearsalAsync.valueOrNull ?? [])
+                        .where((s) => s.sessionId == widget.sessionId)
+                        .firstOrNull
+                        ?.title ??
                     'Attendance',
                 style: Theme.of(context).textTheme.titleMedium,
               ),
@@ -95,18 +101,42 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen> {
 
   Widget _buildBatchActionRow() {
     final membership = ref.watch(currentMembershipProvider).valueOrNull;
-    if (membership == null || !PermissionChecker(membership).isManagement) {
+    if (membership == null || !PermissionChecker(membership).canMarkAttendance) {
       return const SizedBox.shrink();
     }
 
+    // Leader/Director audit follow-up fix: TextButton reliably crashes
+    // Flutter's rendering pipeline with a `!semantics.parentDataDirty`
+    // assertion in tightly-constrained Row/Container layouts on this
+    // Flutter version (same root cause as the chorister audio player fix
+    // in 9e5d954) — the exception is swallowed silently, leaving the whole
+    // screen blank with nothing in adb logcat. Using an InkWell-wrapped
+    // label instead avoids TextButton's internal machinery entirely.
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         children: [
-          TextButton.icon(
-            onPressed: _batchMarkAttended,
-            icon: const Icon(Icons.playlist_add_check, size: 18),
-            label: const Text('Mark all RSVPed as present'),
+          Material(
+            color: Colors.transparent,
+            shape: const StadiumBorder(),
+            child: InkWell(
+              customBorder: const StadiumBorder(),
+              onTap: _batchMarkAttended,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.playlist_add_check, size: 18, color: Theme.of(context).colorScheme.primary),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Mark all RSVPed as present',
+                      style: TextStyle(color: Theme.of(context).colorScheme.primary),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -205,7 +235,9 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen> {
 
   Future<void> _saveAttendance() async {
     try {
-      await ref.read(attendanceRepositoryProvider).batchMarkRSVPAttended(widget.sessionId);
+      final choirId = ref.read(activeChoirIdProvider);
+      if (choirId == null) return;
+      await ref.read(attendanceRepositoryProvider).batchMarkRSVPAttended(widget.sessionId, choirId);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Attendance saved.')),
@@ -223,7 +255,9 @@ class _AttendanceScreenState extends ConsumerState<AttendanceScreen> {
 
   Future<void> _batchMarkAttended() async {
     try {
-      await ref.read(attendanceRepositoryProvider).batchMarkRSVPAttended(widget.sessionId);
+      final choirId = ref.read(activeChoirIdProvider);
+      if (choirId == null) return;
+      await ref.read(attendanceRepositoryProvider).batchMarkRSVPAttended(widget.sessionId, choirId);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('All RSVPs marked as attended')),
@@ -305,17 +339,28 @@ class _AttendanceMemberRow extends ConsumerWidget {
                 ],
               ),
             ),
-            TextButton(
-              onPressed: onPartOverride,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    (attendance?.voicePartOverride ?? membership.defaultVoicePart).initial,
-                    style: const TextStyle(fontWeight: FontWeight.bold),
+            // Leader/Director audit follow-up fix: see _buildBatchActionRow —
+            // TextButton in this same tight-Row layout crashes rendering
+            // silently. InkWell-wrapped label avoids the crash.
+            Material(
+              color: Colors.transparent,
+              shape: const StadiumBorder(),
+              child: InkWell(
+                customBorder: const StadiumBorder(),
+                onTap: onPartOverride,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        (attendance?.voicePartOverride ?? membership.defaultVoicePart).initial,
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const Icon(Icons.arrow_drop_down, size: 18),
+                    ],
                   ),
-                  const Icon(Icons.arrow_drop_down, size: 18),
-                ],
+                ),
               ),
             ),
           ],
@@ -350,9 +395,15 @@ class _VoicePartOverrideSheet extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final attendanceAsync = ref.watch(sessionAttendanceProvider(sessionId));
-    final currentOverride = attendanceAsync.valueOrNull
-        ?.firstWhere((a) => a.userId == member.userId, orElse: () => throw Exception())
-        .voicePartOverride;
+    // Leader/Director audit follow-up fix: firstWhere's orElse threw
+    // synchronously (crashing this sheet's build()) whenever the member had
+    // no attendance record yet for this session — reproduced live by
+    // opening the override sheet for a member who hadn't been RSVPed or
+    // marked present.
+    final currentOverride = (attendanceAsync.valueOrNull ?? [])
+        .where((a) => a.userId == member.userId)
+        .firstOrNull
+        ?.voicePartOverride;
     final effectivePart = currentOverride ?? member.defaultVoicePart;
 
     return Container(

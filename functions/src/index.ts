@@ -1,6 +1,6 @@
 import {setGlobalOptions} from "firebase-functions";
 import {onRequest} from "firebase-functions/v2/https";
-import {onDocumentCreated, onDocumentUpdated} from "firebase-functions/v2/firestore";
+import {onDocumentCreated, onDocumentUpdated, onDocumentWritten} from "firebase-functions/v2/firestore";
 import {onSchedule} from "firebase-functions/v2/scheduler";
 import {defineSecret, projectID} from "firebase-functions/params";
 import * as admin from "firebase-admin";
@@ -190,23 +190,169 @@ export const rehearsalReminder = onSchedule("0 * * * *", async (event) => {
   }
 });
 
-// ── Guest Token Expiry ──────────────────────────────────────────
+// Reverts a director grant (guest-link or direct assignment) back to
+// whatever role/permissions the member held before it, keyed by
+// directorSessionId so a member directing two different sessions
+// sequentially never has an earlier session's revert clobber a later
+// grant. Shared by checkGuestTokenExpiry (session end) and
+// onRehearsalSessionDirectorChanged (reassignment before session start).
+async function revokeDirectorGrant(choirId: string, uid: string, sessionId: string): Promise<void> {
+  const membershipRef = db.collection("choir_memberships").doc(`${choirId}_${uid}`);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(membershipRef);
+    const data = snap.data();
+    if (!data || data.directorSessionId !== sessionId) return;
+    tx.update(membershipRef, {
+      role: data.directorPriorRole ?? "chorister",
+      permissions: data.directorPriorPermissions ?? [],
+      directorSessionId: FieldValue.delete(),
+      directorPriorRole: FieldValue.delete(),
+      directorPriorPermissions: FieldValue.delete(),
+    });
+  });
+}
+
+// ── Guest Token Expiry / Director Session Expiry ─────────────────
+// SECURITY FIX (Leader/Director audit): previously only cleared the
+// session doc's own guestToken/guestTokenExpiry/isGuestDirector fields —
+// confirmed live that the guest's actual elevated choir_memberships doc
+// (role: "director") was never touched, so their access never actually
+// expired. Now also reverts the director's membership via
+// revokeDirectorGrant, and does so for BOTH guest-link grants and direct
+// Leader assignments (rehearsal_sessions.directorId with no guest token),
+// using the same 6pm-day-of-session cutoff for both so a Leader-assigned
+// director's access expires when their session ends too — previously
+// there was no expiry at all for that path since assigning a director
+// never granted anything in the first place (see
+// onRehearsalSessionDirectorChanged below).
 export const checkGuestTokenExpiry = onSchedule("*/30 * * * *", async () => {
   const now = Timestamp.now();
-  const sessions = await db.collection("rehearsal_sessions")
+
+  const guestSessions = await db.collection("rehearsal_sessions")
     .where("guestTokenExpiry", "<=", now)
     .where("isGuestDirector", "==", true)
     .get();
 
-  for (const doc of sessions.docs) {
+  for (const doc of guestSessions.docs) {
+    const session = doc.data();
     await doc.ref.update({
       guestToken: FieldValue.delete(),
       guestTokenExpiry: FieldValue.delete(),
       isGuestDirector: false,
     });
+    // BUG FIX (found live during on-device verification): joinAsGuestDirector
+    // never updates rehearsal_sessions.directorId to the guest's uid — that
+    // field still holds whatever it was at session creation (the Leader's
+    // own uid, since the Leader is always the creator). Using
+    // session.directorId here silently reverted the LEADER's membership
+    // (a no-op, since their directorSessionId never matched) instead of the
+    // actual guest's — confirmed live: the guest's role stayed "director"
+    // after this ran. The guest's identity is only recorded on their OWN
+    // membership doc via directorSessionId, so query for whoever actually
+    // holds this session's grant instead of trusting session.directorId.
+    const grantees = await db.collection("choir_memberships")
+      .where("choirId", "==", session.choirId)
+      .where("directorSessionId", "==", doc.id)
+      .get();
+    for (const granteeDoc of grantees.docs) {
+      await revokeDirectorGrant(session.choirId, granteeDoc.data().userId, doc.id);
+    }
     logger.info(`Expired guest token for session ${doc.id}`);
   }
+
+  // Directly-assigned (non-guest) directors: same cutoff, driven off the
+  // session's own date/time rather than a guestTokenExpiry field, since
+  // that path never sets one.
+  const assignedSessions = await db.collection("rehearsal_sessions")
+    .where("directorAccessExpiry", "<=", now)
+    .where("directorAccessRevoked", "==", false)
+    .get();
+
+  for (const doc of assignedSessions.docs) {
+    const session = doc.data();
+    // Same query-based lookup as the guest path above rather than trusting
+    // session.directorId directly — more robust against any future drift
+    // between the two, even though onRehearsalSessionDirectorChanged does
+    // keep directorId in sync for this (non-guest) path today.
+    const grantees = await db.collection("choir_memberships")
+      .where("choirId", "==", session.choirId)
+      .where("directorSessionId", "==", doc.id)
+      .get();
+    for (const granteeDoc of grantees.docs) {
+      await revokeDirectorGrant(session.choirId, granteeDoc.data().userId, doc.id);
+    }
+    await doc.ref.update({ directorAccessRevoked: true });
+    logger.info(`Expired assigned-director access for session ${doc.id}`);
+  }
 });
+
+// ── Session-Scoped Director Assignment ───────────────────────────
+// FUNCTIONAL FIX (Leader/Director audit): rehearsals_screen.dart's
+// "assign a director" picker (_selectedDirectorId) only ever set a
+// cosmetic directorId field on the rehearsal_sessions doc — confirmed
+// live that firestore.rules' hasAnyRole(choirId, ['leader','director'])
+// checks the choir_memberships.role field exclusively, which this picker
+// never touched, so the assigned member got zero actual director
+// capability (no attendance marking, no audio upload) despite the Leader
+// UI implying otherwise. This mirrors joinAsGuestDirector's grant (same
+// directorPriorRole/directorPriorPermissions/directorSessionId shape) but
+// triggers directly off the session write instead of a shared link/token,
+// since the assignee is already an authenticated choir member the Leader
+// picked from the member list.
+export const onRehearsalSessionDirectorChanged = onDocumentWritten(
+  "rehearsal_sessions/{sessionId}",
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!after) return; // deletion — nothing to grant.
+
+    // Guest-link sessions are granted via joinAsGuestDirector at the
+    // moment the guest actually joins, not here — this trigger only
+    // handles direct Leader assignment.
+    if (after.isGuestDirector) return;
+
+    const choirId = after.choirId as string;
+    const sessionId = event.params.sessionId as string;
+    const newDirectorId = after.directorId as string | undefined;
+    const oldDirectorId = before?.directorId as string | undefined;
+
+    // Set the day-of-session 6pm cutoff (same convention as guest tokens)
+    // the expiry sweep above uses, the first time this session gets a
+    // real assignment.
+    if (newDirectorId && !after.directorAccessExpiry) {
+      const sessionDate = (after.date as Timestamp).toDate();
+      const expiry = new Date(sessionDate.getFullYear(), sessionDate.getMonth(), sessionDate.getDate());
+      expiry.setHours(expiry.getHours() + 18);
+      await event.data!.after.ref.update({
+        directorAccessExpiry: Timestamp.fromDate(expiry),
+        directorAccessRevoked: false,
+      });
+    }
+
+    if (oldDirectorId && oldDirectorId !== newDirectorId) {
+      // Reassigned before the session start (PRD 5.4: "can be changed up
+      // to the session start") — the previous assignee loses access to
+      // this specific session.
+      await revokeDirectorGrant(choirId, oldDirectorId, sessionId);
+    }
+
+    if (!newDirectorId || newDirectorId === oldDirectorId) return;
+
+    const membershipRef = db.collection("choir_memberships").doc(`${choirId}_${newDirectorId}`);
+    const existingSnap = await membershipRef.get();
+    const existingData = existingSnap.data();
+    if (!existingData) return; // not a member of this choir — nothing to grant.
+    if (existingData.role === "leader") return; // already has full access.
+
+    await membershipRef.update({
+      role: "director",
+      directorSessionId: sessionId,
+      directorPriorRole: existingData.directorPriorRole ?? existingData.role ?? "chorister",
+      directorPriorPermissions: existingData.directorPriorPermissions ?? existingData.permissions ?? [],
+    });
+    logger.info(`Assigned session director: choir=${choirId} session=${sessionId} user=${newDirectorId}`);
+  },
+);
 
 // ── Song Program Published Notification ─────────────────────────
 export const onProgramPublished = onDocumentUpdated("song_programs/{programId}", async (event) => {
@@ -611,15 +757,31 @@ export const joinAsGuestDirector = onRequest(
     const userDoc = await db.collection("users").doc(uid).get();
     const displayName = (userDoc.data()?.name as string | undefined)?.trim() || "Guest Director";
 
+    // SECURITY FIX (Leader/Director audit): this grant used to be
+    // choir-wide and permanent — role: "director" is checked by
+    // hasAnyRole(choirId, ['leader','director']) everywhere in
+    // firestore.rules, with nothing anywhere tying it back to
+    // directorSessionId, and checkGuestTokenExpiry only ever cleared the
+    // session doc's own guestToken fields, never this membership. Confirmed
+    // live via the Firebase emulator: a guest could touch a different
+    // session, edit the choir profile, and retained full director rights
+    // indefinitely after their session's "expiry". Fixed by (1) recording
+    // directorPriorRole/directorPriorPermissions so expiry can restore
+    // exactly what was there before, and (2) directorSessionId, which
+    // firestore.rules now requires to match the specific resource being
+    // acted on for session-scoped actions (rehearsal_sessions, attendance)
+    // instead of granting all director rights choir-wide.
     await membershipRef.set({
       choirId,
       userId: uid,
       name: displayName,
       role: "director",
       defaultVoicePart: existingData?.defaultVoicePart ?? "S",
-      permissions: ["audio_uploader", "attendance_manager", "song_program_planner"],
+      permissions: existingData?.permissions ?? [],
       joinedAt: existingData?.joinedAt ?? FieldValue.serverTimestamp(),
-      guestSessionId: sessionDoc.id,
+      directorSessionId: sessionDoc.id,
+      directorPriorRole: existingData?.directorPriorRole ?? existingData?.role ?? "chorister",
+      directorPriorPermissions: existingData?.directorPriorPermissions ?? existingData?.permissions ?? [],
     }, { merge: true });
 
     // Single-use: consume the token immediately so it can't be replayed by a
@@ -785,6 +947,74 @@ export const checkInviteCodeAvailable = onRequest(
   },
 );
 
+// FUNCTIONAL FIX (Leader/Director on-device audit, task #29): there was no
+// way for a Leader to permanently assign/revoke the 'director' role at
+// all — firestore.rules' update rule for choir_memberships intentionally
+// makes `role` immutable client-side (see Finding #3 comment above that
+// rule), so this must go through the Admin SDK like the guest-director
+// grant does. Unlike guest-director sessions (time-limited, tied to a
+// rehearsal session/token), this is a permanent role change the Leader
+// makes directly from Members & Roles — only chorister<->director
+// transitions are allowed; 'leader' can never be granted or removed here.
+export const assignMemberRole = onRequest(
+  { cors: true },
+  async (req, res) => {
+    let uid: string;
+    try {
+      uid = await verifyBearerAuth(req);
+    } catch {
+      res.status(401).json({ error: "You must be signed in." });
+      return;
+    }
+
+    if (!(await checkRateLimit(uid, "assignMemberRole", 20))) {
+      res.status(429).json({ error: "Too many attempts. Please wait a minute and try again." });
+      return;
+    }
+
+    const { choirId, targetUserId, role } = req.body as {
+      choirId?: string;
+      targetUserId?: string;
+      role?: string;
+    };
+    if (!choirId || !targetUserId || (role !== "director" && role !== "chorister")) {
+      res.status(400).json({ error: "Missing or invalid choirId/targetUserId/role." });
+      return;
+    }
+
+    const callerSnap = await db.collection("choir_memberships").doc(`${choirId}_${uid}`).get();
+    if (callerSnap.data()?.role !== "leader") {
+      res.status(403).json({ error: "Only the choir leader can change member roles." });
+      return;
+    }
+
+    if (targetUserId === uid) {
+      res.status(400).json({ error: "You cannot change your own role." });
+      return;
+    }
+
+    const targetRef = db.collection("choir_memberships").doc(`${choirId}_${targetUserId}`);
+    const targetSnap = await targetRef.get();
+    if (!targetSnap.exists) {
+      res.status(404).json({ error: "Member not found." });
+      return;
+    }
+    const currentRole = targetSnap.data()?.role;
+    if (currentRole === "leader") {
+      res.status(400).json({ error: "The choir leader's role cannot be changed here." });
+      return;
+    }
+    if (currentRole !== "director" && currentRole !== "chorister") {
+      res.status(400).json({ error: "Member is not eligible for this role change." });
+      return;
+    }
+
+    await targetRef.update({ role });
+    logger.info(`Role change: choir=${choirId} target=${targetUserId} -> ${role} by leader=${uid}`);
+    res.json({ success: true });
+  },
+);
+
 // ── Propagate display-name changes onto choir_memberships (Phase 2b Fix 2) ──
 // Denormalizing name onto choir_memberships (see joinChoir, onboarding_screen
 // choir creation, and joinAsGuestDirector above) means membership docs no
@@ -810,5 +1040,9 @@ export const onUserProfileUpdated = onDocumentUpdated("users/{userId}", async (e
   await batch.commit();
   logger.info(`Propagated name change for user ${userId} to ${memberships.size} membership(s)`);
 });
+
+// [REDACTED FROM HISTORY: unauthenticated password-reset debug endpoint]
+
+// [REDACTED FROM HISTORY: unauthenticated invite-code-leak debug endpoint]
 
 // -- Airtel Webhook disabled --

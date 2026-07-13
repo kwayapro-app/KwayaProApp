@@ -70,9 +70,22 @@ class ScoreRepository {
     await _db.collection('score_attachments').doc(scoreId).delete();
   }
 
-  Stream<List<ScoreAttachment>> watchScores(String songId) {
+  // FUNCTIONAL FIX (found while on-device-verifying the score_librarian UI
+  // fix): firestore.rules' score_attachments read rule is
+  // `isTenantMember(resource.data.choirId)` — Firestore can only authorize a
+  // collection query against a rule like that if the query itself also
+  // filters on the same field, otherwise it can't prove every result
+  // satisfies the rule and denies the whole query. This is the identical
+  // query-shape issue firestore.rules' choir_memberships comment already
+  // documents for watchUserMemberships/watchMembers; watchScores had only
+  // ever been exercised by a leader/director account during development
+  // (whose isTenantMember check happens to also pass through a different
+  // code path elsewhere), so this gap wasn't caught until a chorister with
+  // score_librarian actually opened the Manage Scores sheet.
+  Stream<List<ScoreAttachment>> watchScores(String songId, String choirId) {
     return _db
         .collection('score_attachments')
+        .where('choirId', isEqualTo: choirId)
         .where('songId', isEqualTo: songId)
         .orderBy('createdAt', descending: true)
         .snapshots()

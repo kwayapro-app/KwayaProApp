@@ -472,12 +472,23 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
         context.go('/home');
       }
     } catch (e) {
+      // Leader/Director audit follow-up fix: this setState wasn't guarded,
+      // unlike the SnackBar just below it. Root cause traced to
+      // app_router.dart's _RouterRefreshNotifier, which listens to
+      // userChoirsProvider and calls notifyListeners() on every emission —
+      // including a transient PERMISSION_DENIED that can occur on the very
+      // first listen of the choir doc this method just created (rules
+      // propagation lag on a brand-new document). That notification can
+      // make go_router re-run redirect and dispose this screen between the
+      // `mounted` check above and context.go('/home') executing (or between
+      // there and here), so `context.go` itself can throw on an unmounted
+      // context and land in this catch block after disposal. mounted must
+      // be checked here too, not just for the SnackBar.
+      if (!mounted) return;
       setState(() => _isLoading = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Setup failed: $e')),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Setup failed: $e')),
+      );
     }
   }
 
